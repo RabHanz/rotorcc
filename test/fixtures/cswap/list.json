@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "activeAccountNumber": 1,
+  "accounts": [
+    {
+      "number": 1,
+      "email": "first@example.com",
+      "organizationName": "first@example.com's Organization",
+      "organizationUuid": "2dba1b1a-5e3f-4024-aae1-8f9f480bd95a",
+      "isOrganization": true,
+      "active": true,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 7.0,
+          "resetsAt": "2026-08-18T00:09:59.641545+00:00",
+          "countdown": "4h 15m",
+          "clock": "05:09"
+        },
+        "sevenDay": {
+          "pct": 2.0,
+          "resetsAt": "2026-08-24T06:59:59.641589+00:00",
+          "countdown": "6d 11h",
+          "clock": "Aug 24 11:59"
+        },
+        "scoped": [
+          {
+            "pct": 2.0,
+            "resetsAt": "2026-08-24T06:59:59.641875+00:00",
+            "countdown": "6d 11h",
+            "clock": "Aug 24 11:59",
+            "name": "Fable"
+          }
+        ]
+      },
+      "alias": "first",
+      "usageFetchedAt": "2026-08-17T19:54:46Z",
+      "usageAgeSeconds": 0.0
+    },
+    {
+      "number": 2,
+      "email": "second@example.com",
+      "isOrganization": true,
+      "active": false,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": {
+          "pct": 100.0,
+          "resetsAt": "2026-08-17T20:19:59.895368+00:00",
+          "countdown": "25m",
+          "clock": "01:19"
+        },
+        "sevenDay": {
+          "pct": 39.0,
+          "resetsAt": "2026-08-24T08:59:59.895396+00:00",
+          "countdown": "6d 13h",
+          "clock": "Aug 24 13:59"
+        },
+        "scoped": [
+          {
+            "pct": 19.0,
+            "resetsAt": "2026-08-24T08:59:59.895601+00:00",
+            "countdown": "6d 13h",
+            "clock": "Aug 24 13:59",
+            "name": "Fable"
+          }
+        ]
+      },
+      "alias": "second",
+      "usageFetchedAt": "2026-08-17T19:49:43Z",
+      "usageAgeSeconds": 303.5
+    },
+    {
+      "number": 3,
+      "email": "third@example.com",
+      "isOrganization": true,
+      "active": false,
+      "usageStatus": "ok",
+      "usage": {
+        "fiveHour": { "pct": 0.0 },
+        "sevenDay": { "pct": 0.0 },
+        "scoped": [{ "pct": 0.0, "name": "Fable" }]
+      },
+      "alias": "third",
+      "usageFetchedAt": "2026-08-17T19:49:43Z",
+      "usageAgeSeconds": 303.5
+    }
+  ]
+}

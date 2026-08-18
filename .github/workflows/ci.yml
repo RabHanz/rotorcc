@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # The git-backed tests commit in temp repositories, so the runner needs an
+      # identity. It has none by default on any of the three platforms.
+      - name: Configure git identity
+        run: |
+          git config --global user.name "rotorcc ci"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch main
+
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      # A packaged tarball that does not actually run is the classic release
+      # bug, so the built CLI is executed from a clean install of the pack.
+      - name: Smoke-test the packed CLI
+        shell: bash
+        run: |
+          npm pack --silent
+          mkdir -p /tmp/rotorcc-smoke
+          npm install --no-save --prefix /tmp/rotorcc-smoke ./rotorcc-*.tgz
+          node /tmp/rotorcc-smoke/node_modules/rotorcc/dist/cli.js --version
+          node /tmp/rotorcc-smoke/node_modules/rotorcc/dist/cli.js --help | head -3

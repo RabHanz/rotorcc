@@ -1,0 +1,23 @@
+{
+  "session_id": "3b8a25fb-1a0b-4e61-8212-2b6caf8087a6",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/3b8a25fb-1a0b-4e61-8212-2b6caf8087a6.jsonl",
+  "cwd": "/home/dev/project",
+  "prompt_id": "e959aa0e-a78e-462a-9803-c52360383252",
+  "permission_mode": "default",
+  "agent_id": "a35633c6c8cc6e04a",
+  "agent_type": "general-purpose",
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/dev/.claude/projects/-home-dev-project/3b8a25fb-1a0b-4e61-8212-2b6caf8087a6/subagents/agent-a35633c6c8cc6e04a.jsonl",
+  "last_assistant_message": "ping",
+  "background_tasks": [
+    {
+      "id": "a35633c6c8cc6e04a",
+      "type": "subagent",
+      "status": "running",
+      "description": "subagent to reply with ping",
+      "agent_type": "general-purpose"
+    }
+  ],
+  "session_crons": []
+}

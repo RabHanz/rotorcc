@@ -1,0 +1,2 @@
+{"schemaVersion": 1, "event": "poll", "ts": "2026-08-17T19:55:07Z", "active": {"number": 1, "email": "first@example.com"}, "headroomPct": {"1": 93.0, "2": 0.0, "3": 100.0}, "threshold": 95.0, "windowsPct": {"1": {"5h": 7.0, "7d": 2.0, "Fable": 2.0}, "2": {"5h": 100.0, "7d": 39.0, "Fable": 19.0}, "3": {"5h": 0.0, "7d": 0.0, "Fable": 0.0}}}
+{"schemaVersion": 1, "event": "no-switch", "ts": "2026-08-17T19:55:07Z", "reason": "below-threshold", "detail": "7% < 95%"}

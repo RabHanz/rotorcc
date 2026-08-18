@@ -1,0 +1,9 @@
+{
+  "session_id": "3b8a25fb-1a0b-4e61-8212-2b6caf8087a6",
+  "transcript_path": "/home/dev/.claude/projects/-home-dev-project/3b8a25fb-1a0b-4e61-8212-2b6caf8087a6.jsonl",
+  "cwd": "/home/dev/project",
+  "prompt_id": "c5827ef4-fd3a-47d7-a0d9-5a3bfa532283",
+  "hook_event_name": "PostCompact",
+  "trigger": "manual",
+  "compact_summary": "<summary>\n1. Primary Request and Intent:\n   The user asked for one subagent that replies with the word ping.\n</summary>"
+}
