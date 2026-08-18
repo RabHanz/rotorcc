@@ -66,6 +66,13 @@ opens the replacement session with a prompt telling it to read the manifest.
 closed laptop — the next `SessionStart` finds an unclean exit, rescues whatever
 is uncommitted, and hands the new session the resume plan as its first context.
 
+If your environment does not permit switching accounts automatically, set
+`rotation.enabled` to `false`. Layers one and three are the ones that actually
+prevent loss, and they keep working: rotorcc still watches headroom, still warns,
+still checkpoints everything at the soft threshold, still writes the manifest at
+the rotate threshold and tells your agent to wrap up. It just leaves the switch
+to you.
+
 ## What it cannot do
 
 Read this part. A backup tool that oversells itself is worse than none.
@@ -146,8 +153,15 @@ settings you are most likely to change:
     "resumePrompt": "rotorcc resume: read {{manifestMarkdown}} and continue every lane…",
   },
 
-  "secretsScreen": { "enabled": true, "extraPatterns": [] },
+  "secretsScreen": { "enabled": true, "onHit": "mirror-only", "extraPatterns": [] },
   "retire": { "killOldWindow": false, "quiesceSeconds": 180 },
+
+  // The master switch for switching accounts. Turn it off and rotorcc becomes
+  // a pure durability tool: it still watches, warns, checkpoints and recovers a
+  // crashed session, and it never switches. Whether a machine may change
+  // accounts by itself is a policy question, and it deserves one explicit
+  // boolean rather than being inferred from a threshold set to zero.
+  "rotation": { "enabled": true },
 }
 ```
 
@@ -159,11 +173,23 @@ than stored.
 
 - rotorcc never reads, copies or transmits credential files. It reads the
   account switcher's usage output, and nothing else about your accounts.
-- Before mirroring a snapshot off the machine, it screens the new bytes for
-  credential shapes — private keys, cloud access keys, provider tokens, JWTs,
-  credential-shaped assignments. A hit refuses **the mirror only** and says so
-  loudly. The local copy is still made: those bytes were already on that disk,
-  and refusing to back them up would protect nothing.
+- Every snapshot's new bytes are screened for credential shapes — private keys,
+  cloud access keys, provider tokens, JWTs, credential-shaped assignments — and
+  the screen runs on the source, before anything is written. What a hit does is
+  yours to choose (`secretsScreen.onHit`):
+
+  |                         |                                                         |
+  | ----------------------- | ------------------------------------------------------- |
+  | `mirror-only` (default) | copy locally, refuse the off-machine mirror, log loudly |
+  | `skip-file`             | that transcript never enters the store at all           |
+  | `fail-closed`           | abandon the whole snapshot                              |
+
+  The default is `mirror-only` because those bytes are already at rest on that
+  disk, and declining to back them up protects nothing while leaving the session
+  unrecoverable. Choose `skip-file` when the store outlives or is read more
+  widely than the transcripts — a git store keeps history the originals may not,
+  and git history is hard to purge.
+
 - Log output is redacted with the same patterns.
 - No telemetry. No network calls except your own mirror target and whatever the
   account switcher does.

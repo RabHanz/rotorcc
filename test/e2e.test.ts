@@ -377,6 +377,121 @@ describe('end to end', () => {
     expect(JSON.stringify(result.snapshot?.secretHits)).not.toContain('8f2b91c4d7e6a05b3f1c9d8e');
   });
 
+  it('with onHit "skip-file", a secret-bearing transcript never enters the store', async () => {
+    config = parseConfig({
+      ...(JSON.parse(JSON.stringify(config)) as object),
+      secretsScreen: { enabled: true, onHit: 'skip-file' },
+    });
+
+    // One clean transcript and one carrying a credential shape.
+    const dir = transcriptDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'clean.jsonl'), '{"type":"user","text":"ordinary work"}\n');
+    writeFileSync(
+      join(dir, 'tainted.jsonl'),
+      '{"type":"user","text":"AWS_SECRET_ACCESS_KEY=8f2b91c4d7e6a05b3f1c9d8e"}\n',
+    );
+
+    const result = await performCheckpoint({
+      config,
+      store,
+      logger,
+      trigger: 'test',
+      dryRun: false,
+      skipLanes: true,
+    });
+
+    const storeDir = join(config.storePath, 'projects', projectSlug(repo));
+    expect(existsSync(join(storeDir, 'clean.jsonl'))).toBe(true);
+    // The point of skip-file: it is not in the store, so it is not in history.
+    expect(existsSync(join(storeDir, 'tainted.jsonl'))).toBe(false);
+    expect(result.snapshot?.skipped.join(' ')).toContain('tainted.jsonl');
+    expect(result.snapshot?.secretHits.length).toBeGreaterThan(0);
+    // The original is untouched where it already was.
+    expect(existsSync(join(dir, 'tainted.jsonl'))).toBe(true);
+    expect(git(config.storePath, 'log', '--stat', '-1')).not.toContain('tainted.jsonl');
+  });
+
+  it('retracts a copy an earlier, laxer policy already made', async () => {
+    const dir = transcriptDir();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'later-tainted.jsonl'), '{"type":"user","text":"still clean"}\n');
+
+    // First pass under the default policy: the file is copied.
+    await performCheckpoint({
+      config,
+      store,
+      logger,
+      trigger: 'a',
+      dryRun: false,
+      skipLanes: true,
+    });
+    const stored = join(config.storePath, 'projects', projectSlug(repo), 'later-tainted.jsonl');
+    expect(existsSync(stored)).toBe(true);
+
+    // The transcript then picks up something credential-shaped, and the policy
+    // tightens. Leaving the earlier copy would be the worst of both worlds.
+    writeFileSync(
+      join(dir, 'later-tainted.jsonl'),
+      '{"type":"user","text":"still clean"}\n{"type":"user","text":"GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789"}\n',
+    );
+    config = parseConfig({
+      ...(JSON.parse(JSON.stringify(config)) as object),
+      secretsScreen: { enabled: true, onHit: 'skip-file' },
+    });
+
+    const result = await performCheckpoint({
+      config,
+      store,
+      logger,
+      trigger: 'b',
+      dryRun: false,
+      skipLanes: true,
+    });
+    expect(existsSync(stored)).toBe(false);
+    expect(result.snapshot?.skipped.join(' ')).toContain('earlier copy retracted');
+    // History is a different question, and the tool does not pretend otherwise.
+    expect(git(config.storePath, 'log', '--all', '--oneline', '--', stored)).not.toBe('');
+  });
+
+  it('with onHit "fail-closed", nothing is copied at all', async () => {
+    config = parseConfig({
+      ...(JSON.parse(JSON.stringify(config)) as object),
+      secretsScreen: { enabled: true, onHit: 'fail-closed' },
+    });
+    appendTranscript('{"type":"user","text":"AWS_SECRET_ACCESS_KEY=8f2b91c4d7e6a05b3f1c9d8e"}');
+
+    const result = await performCheckpoint({
+      config,
+      store,
+      logger,
+      trigger: 'test',
+      dryRun: false,
+      skipLanes: true,
+    });
+    expect(result.snapshot?.filesCopied).toBe(0);
+    expect(result.snapshot?.commit).toBeNull();
+    expect(result.snapshot?.mirror.detail).toContain('abandoned');
+  });
+
+  it('with rotation disabled it checkpoints at the rotate threshold but never switches', async () => {
+    config = parseConfig({
+      ...(JSON.parse(JSON.stringify(config)) as object),
+      rotation: { enabled: false },
+    });
+    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
+
+    const result = await tick(ctx());
+    expect(result.decision?.level).toBe('rotate');
+    expect(result.actionsTaken.some((a) => a.startsWith('switched'))).toBe(false);
+    expect(result.actionsTaken.some((a) => a.startsWith('dry-run-switch'))).toBe(false);
+    expect(result.actionsTaken.join(' ')).toContain('rotation is disabled');
+    expect(result.actionsTaken).toContain('soft-checkpoint');
+    expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
+    // The work is still safe, which is the part that actually matters.
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+  });
+
   it('survives a usage source that is broken, without touching anything', async () => {
     config = parseConfig({
       ...JSON.parse(JSON.stringify(config)),

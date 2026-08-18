@@ -218,7 +218,14 @@ export function decide(reading: UsageReading, config: Config, state: RotorState)
       state.lastRotationAt === null
         ? Number.POSITIVE_INFINITY
         : secondsBetween(state.lastRotationAt, now);
-    if (sinceLast < config.cooldownSeconds) {
+    if (!config.rotation.enabled) {
+      actions.push({
+        kind: 'blocked',
+        reason:
+          'rotation is disabled in this configuration; checkpointing and writing the manifest instead',
+      });
+      reasons.push('rotation disabled');
+    } else if (sinceLast < config.cooldownSeconds) {
       actions.push({
         kind: 'blocked',
         reason: `cooldown: last rotation was ${Math.round(sinceLast)}s ago, cooldown is ${config.cooldownSeconds}s`,
@@ -291,7 +298,15 @@ export function decideHardKill(
       : secondsBetween(state.lastRotationAt, now);
 
   let target: AccountReading | null = null;
-  if (sinceLast < config.cooldownSeconds) {
+  if (!config.rotation.enabled) {
+    // A hard limit is the strongest possible signal, and it still does not
+    // authorise a switch the operator has turned off. Save everything instead.
+    actions.push({
+      kind: 'blocked',
+      reason: 'rotation is disabled in this configuration; the account must be switched by hand',
+    });
+    actions.push({ kind: 'soft-checkpoint' });
+  } else if (sinceLast < config.cooldownSeconds) {
     actions.push({
       kind: 'blocked',
       reason: `cooldown: last rotation was ${Math.round(sinceLast)}s ago`,

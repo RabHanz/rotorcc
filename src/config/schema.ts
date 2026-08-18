@@ -98,6 +98,22 @@ export const secretsScreenSchema = z.object({
     .int()
     .positive()
     .default(8 * 1024 * 1024),
+  /**
+   * What a hit does.
+   *
+   *   mirror-only  copy locally, refuse the off-machine mirror. The default,
+   *                because those bytes are already at rest on this disk and
+   *                declining to back them up protects nothing while leaving
+   *                the session unrecoverable.
+   *   skip-file    do not copy that file into the store at all. Choose this
+   *                where the store is more durable or more widely readable
+   *                than the transcripts themselves — a git store keeps history
+   *                the originals may not, and git history is hard to purge.
+   *   fail-closed  abandon the whole snapshot. Strictest, and it means one
+   *                credential-shaped string in one transcript stops every
+   *                transcript being backed up. Know that before choosing it.
+   */
+  onHit: z.enum(['mirror-only', 'skip-file', 'fail-closed']).default('mirror-only'),
 });
 
 export const hardKillSchema = z.object({
@@ -181,6 +197,26 @@ export const configSchema = z.object({
       softPct: pct.default(10),
       /** Write the manifest, switch accounts, launch the successor. */
       rotatePct: pct.default(5),
+    })
+    .default({}),
+
+  /**
+   * The master switch for switching accounts.
+   *
+   * Turn it off and rotorcc becomes a pure durability tool: it still watches
+   * headroom, still warns, still checkpoints everything at the soft threshold,
+   * still writes the manifest at the rotate threshold, still recovers a crashed
+   * session — it just never switches accounts and never launches a successor,
+   * and says so in the flag it raises.
+   *
+   * This exists because "should this machine switch accounts automatically?" is
+   * a policy question, not a configuration detail. Some environments forbid it.
+   * Making that a single, explicit, auditable boolean is better than expecting
+   * an operator to infer it from a threshold set to zero.
+   */
+  rotation: z
+    .object({
+      enabled: z.boolean().default(true),
     })
     .default({}),
 

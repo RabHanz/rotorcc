@@ -20,6 +20,7 @@ import {
   readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
   writeFileSync,
   copyFileSync,
   utimesSync,
@@ -162,6 +163,7 @@ export async function snapshot(options: SnapshotOptions): Promise<SnapshotResult
 
   const copied: CopiedFile[] = [];
   const skipped: string[] = [];
+  const secretHits: SecretHit[] = [];
   let bytesCopied = 0;
 
   for (const source of sources) {
@@ -198,6 +200,77 @@ export async function snapshot(options: SnapshotOptions): Promise<SnapshotResult
       }
       if (unchanged) continue;
 
+      const relativePath = join(source.to, rel).split(sep).join('/');
+
+      // Screen the SOURCE before anything is written, not the destination
+      // after. Only then can `skip-file` actually mean the file never enters
+      // the store — screening a copy you have already made is an audit trail,
+      // not a control.
+      let fileHits: SecretHit[] = [];
+      if (config.secretsScreen.enabled) {
+        try {
+          const text = await readAppendedRegion(
+            from,
+            previousSize,
+            config.secretsScreen.maxScanBytes,
+          );
+          fileHits = scanText(text, relativePath, patterns);
+        } catch {
+          skipped.push(`${relativePath} (unreadable during secrets screen)`);
+        }
+      }
+      secretHits.push(...fileHits);
+
+      if (fileHits.length > 0 && config.secretsScreen.onHit === 'fail-closed') {
+        logger.error(
+          'SNAPSHOT ABANDONED: secretsScreen.onHit is "fail-closed" and the new bytes matched ' +
+            'a credential shape. Nothing was copied, including the transcripts that were clean.',
+          { file: relativePath, patterns: fileHits.map((h) => h.patternId).join(',') },
+        );
+        return {
+          storePath,
+          filesCopied: 0,
+          bytesCopied: 0,
+          commit: null,
+          committed: false,
+          secretHits,
+          mirror: { attempted: false, ok: false, detail: 'refused: snapshot abandoned' },
+          sources: sources.map((s) => s.from),
+          skipped: [...skipped, `${relativePath} (fail-closed)`],
+          durationMs: Date.now() - started,
+        };
+      }
+
+      if (fileHits.length > 0 && config.secretsScreen.onHit === 'skip-file') {
+        // Also retract any copy an earlier run made under a laxer policy.
+        // Leaving it would be the worst of both: the file is no longer backed
+        // up, and the store still holds the part that tripped the screen.
+        let retracted = false;
+        try {
+          if (statSync(to).isFile()) {
+            unlinkSync(to);
+            retracted = true;
+          }
+        } catch {
+          /* nothing there to retract */
+        }
+        logger.warn(
+          'not copying a transcript whose new bytes matched a credential shape ' +
+            '(secretsScreen.onHit is "skip-file"). The original is untouched where it already ' +
+            'was. Note that retracting a file from the store does NOT remove it from the ' +
+            "store's git history; purging history is a separate, deliberate act.",
+          {
+            file: relativePath,
+            patterns: fileHits.map((h) => h.patternId).join(','),
+            retractedEarlierCopy: retracted,
+          },
+        );
+        skipped.push(
+          `${relativePath} (secrets screen${retracted ? ', earlier copy retracted' : ''})`,
+        );
+        continue;
+      }
+
       mkdirSync(dirname(to), { recursive: true });
       copyFileSync(from, to);
       try {
@@ -206,31 +279,12 @@ export async function snapshot(options: SnapshotOptions): Promise<SnapshotResult
         /* some filesystems refuse; the size comparison still holds */
       }
       copied.push({
-        relativePath: join(source.to, rel).split(sep).join('/'),
+        relativePath,
         bytes: sourceStat.size,
         appendedFrom: previousSize,
         isNew: previousSize === 0,
       });
       bytesCopied += Math.max(0, sourceStat.size - previousSize);
-    }
-  }
-
-  // Screen only the delta. Everything copied is already on this disk; the
-  // screen exists to decide whether it may leave the machine.
-  const secretHits: SecretHit[] = [];
-  if (config.secretsScreen.enabled) {
-    for (const file of copied) {
-      const absolute = join(storePath, file.relativePath);
-      try {
-        const text = await readAppendedRegion(
-          absolute,
-          file.appendedFrom,
-          config.secretsScreen.maxScanBytes,
-        );
-        secretHits.push(...scanText(text, file.relativePath, patterns));
-      } catch {
-        skipped.push(`${file.relativePath} (unreadable during secrets screen)`);
-      }
     }
   }
 

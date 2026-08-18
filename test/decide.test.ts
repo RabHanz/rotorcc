@@ -208,6 +208,48 @@ describe('decide — cooldown and thrash refusal', () => {
   });
 });
 
+describe('decide — rotation disabled', () => {
+  // Whether a machine may switch accounts by itself is a policy question, not a
+  // threshold. With rotation off, every durability behaviour stays and the
+  // switch never happens.
+  const noRotation = { ...config, rotation: { enabled: false } };
+
+  it('never emits a rotate action, however low headroom goes', () => {
+    const decision = decide(reading(1, [100, 100]), noRotation, emptyState());
+    expect(decision.level).toBe('rotate');
+    expect(decision.actions.some((a) => a.kind === 'rotate')).toBe(false);
+  });
+
+  it('checkpoints instead, and says why it did not switch', () => {
+    const decision = decide(reading(1, [100]), noRotation, emptyState());
+    expect(decision.actions).toContainEqual({ kind: 'soft-checkpoint' });
+    const blocked = decision.actions.find((a) => a.kind === 'blocked');
+    expect(blocked && 'reason' in blocked ? blocked.reason : '').toContain('rotation is disabled');
+  });
+
+  it('still warns and still soft-checkpoints at the higher thresholds', () => {
+    expect(decide(reading(14), noRotation, emptyState()).actions).toEqual([
+      { kind: 'log-warning' },
+    ]);
+    expect(decide(reading(9), noRotation, emptyState()).actions).toContainEqual({
+      kind: 'soft-checkpoint',
+    });
+  });
+
+  it('does not record a rotation that never happened', () => {
+    const decision = decide(reading(1, [100]), noRotation, emptyState());
+    expect(decision.nextState.lastRotationAt).toBeNull();
+    expect(decision.nextState.lastRotationTarget).toBeNull();
+  });
+
+  it('refuses to switch even on a hard limit, and saves the work instead', () => {
+    const decision = decideHardKill(reading(93, [95]), noRotation, emptyState(), 'limit-signature');
+    expect(decision.actions.some((a) => a.kind === 'rotate')).toBe(false);
+    expect(decision.actions).toContainEqual({ kind: 'soft-checkpoint' });
+    expect(decision.nextState.lastRotationAt).toBeNull();
+  });
+});
+
 describe('decideHardKill', () => {
   it('rotates regardless of the percentages when the limit was actually hit', () => {
     const decision = decideHardKill(reading(93, [95]), config, emptyState(), 'limit-signature');
