@@ -266,6 +266,16 @@ export interface CheckpointOptions {
   dryRun: boolean;
   /** Commit message template; `{{trigger}}` and `{{timestamp}}` are replaced. */
   messageTemplate?: string;
+  /**
+   * Whether to `git add -A && git commit` a tree's dirty files before pushing.
+   * Default true — the terminal paths (session end, rotation, crash
+   * reconstruction) need it, because that is when uncommitted work would die.
+   * Routine hook events set it false: they only push commits an agent already
+   * made. Committing on every SubagentStop turned a perpetually-dirty tree into
+   * a commit-and-push every few minutes, which spams history and cancels the
+   * project's CI run each time (found in production dogfood, 2026-08-18).
+   */
+  commitDirty?: boolean;
 }
 
 export function checkpointMessage(options: CheckpointOptions): string {
@@ -306,7 +316,14 @@ export async function checkpointTree(
   }
 
   let committed = false;
-  if (tree.dirtyFiles > 0) {
+  const commitDirty = options.commitDirty ?? true;
+  if (tree.dirtyFiles > 0 && !commitDirty) {
+    // Routine trigger: leave the agent's uncommitted edits alone and only push
+    // what it has already committed. The dirty count still reaches the manifest.
+    if ((tree.ahead ?? 0) === 0) {
+      return { ...base, skipped: `${tree.dirtyFiles} dirty file(s) left uncommitted (routine trigger)` };
+    }
+  } else if (tree.dirtyFiles > 0) {
     if (options.dryRun) {
       return { ...base, skipped: `dry run: would commit ${tree.dirtyFiles} file(s) and push` };
     }

@@ -334,6 +334,10 @@ async function runHeavyWork(
       writeManifest: event === 'SessionEnd',
       cleanExit: event === 'SessionEnd',
       skipLanes: snapshotOnly,
+      // Only the session's end commits an agent's uncommitted edits — that is
+      // the moment they would otherwise be lost. Every other event pushes what
+      // agents have already committed and leaves their working trees alone.
+      commitDirty: event === 'SessionEnd',
       // The local copy is what protects the work. The off-machine mirror is a
       // backup of a backup, and it is left to the scheduled tick so that a slow
       // or full target can never stall a checkpoint behind it.

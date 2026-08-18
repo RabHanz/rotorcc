@@ -40,6 +40,16 @@ First release.
 ## Unreleased
 
 ### Fixed (found in production dogfood, 2026-08-18)
+- Routine hook events (`SubagentStop`, `Stop`, `UserPromptSubmit`) committed every
+  dirty tree with a `wip(rotorcc)` commit and pushed it. On a busy orchestrator
+  (48 trees, one perpetually-dirty from build artefacts) that meant a commit-and-
+  push every few minutes, which polluted branch history, switched the operator's
+  own checkout under them, and cancelled the project's CI run on every push. New
+  `commitDirty` option on `checkpointTree`/`performCheckpoint`: routine hooks pass
+  `false` and only push what agents already committed; `SessionEnd`, rotation and
+  crash reconstruction keep `true` — the moments uncommitted work would actually be
+  lost. Two tests pin the routine behaviour. `includeMainTree` should be `false`
+  for an orchestrator's own checkout (documented in ROTOR setup).
 - A `ROTATE_NOW` flag written by a `--dry-run` rotation survived on disk and was
   surfaced by the `UserPromptSubmit` hook to a healthy live session hours later
   (real level `ok`, 72% headroom, `rotation.enabled=false`) — the orchestrator was

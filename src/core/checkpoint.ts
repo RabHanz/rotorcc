@@ -55,6 +55,12 @@ export interface CheckpointInput {
   skipLanes?: boolean;
   /** Leave the off-machine mirror to the scheduled tick. Set by hooks. */
   skipMirror?: boolean;
+  /**
+   * Commit dirty files before pushing (default true). Routine hook events pass
+   * false so that only already-committed work is pushed; the terminal paths —
+   * SessionEnd, rotation, crash reconstruction — keep the default.
+   */
+  commitDirty?: boolean;
   usage?: UsageReading | undefined;
   targetAccount?: number | undefined;
   writeManifest?: boolean;
@@ -240,6 +246,7 @@ export async function performCheckpoint(input: CheckpointInput): Promise<Checkpo
       trigger,
       timestamp,
       dryRun,
+      ...(input.commitDirty === undefined ? {} : { commitDirty: input.commitDirty }),
     });
     result.projects.push({ project: project.path, trees, outcomes });
     const pushedCount = outcomes.filter((o) => o.pushed).length;

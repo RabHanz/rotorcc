@@ -144,6 +144,41 @@ describe('checkpointTree — the safety rules', () => {
     expect(git(remote, 'log', '-1', '--format=%s', 'work/feature')).toContain('auto-checkpoint');
   });
 
+  it('on a routine trigger (commitDirty=false) leaves dirty files alone and pushes only what is committed', async () => {
+    git(repo, 'switch', '-c', 'work/routine');
+    git(repo, 'push', '-u', 'origin', 'work/routine');
+    // one commit the agent made itself, plus an uncommitted edit in progress
+    writeFileSync(join(repo, 'done.txt'), 'committed by the agent\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'agent commit');
+    writeFileSync(join(repo, 'wip.txt'), 'still editing\n');
+
+    const tree = await inspectTree(ctx, repo, project(), true);
+    expect(tree?.ahead).toBe(1);
+    expect(tree?.dirtyFiles).toBe(1);
+
+    const result = await checkpointTree(ctx, tree!, { ...options, commitDirty: false });
+    expect(result.committed).toBe(false);
+    expect(result.pushed).toBe(true);
+    // the agent's own commit reached the remote…
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/routine')).toContain('agent commit');
+    // …and its in-progress edit was NOT swept into a wip commit
+    expect(git(repo, 'status', '--porcelain')).toContain('wip.txt');
+    expect(git(repo, 'log', '-1', '--format=%s')).toContain('agent commit');
+  });
+
+  it('on a routine trigger with nothing committed and only dirty files, does nothing and says so', async () => {
+    git(repo, 'switch', '-c', 'work/only-dirty');
+    git(repo, 'push', '-u', 'origin', 'work/only-dirty');
+    writeFileSync(join(repo, 'wip.txt'), 'still editing\n');
+    const tree = await inspectTree(ctx, repo, project(), true);
+    const result = await checkpointTree(ctx, tree!, { ...options, commitDirty: false });
+    expect(result.committed).toBe(false);
+    expect(result.pushed).toBe(false);
+    expect(result.skipped).toContain('left uncommitted');
+    expect(git(repo, 'status', '--porcelain')).toContain('wip.txt');
+  });
+
   it('pushes a branch that is ahead even when nothing is dirty', async () => {
     git(repo, 'switch', '-c', 'work/ahead');
     git(repo, 'push', '-u', 'origin', 'work/ahead');
