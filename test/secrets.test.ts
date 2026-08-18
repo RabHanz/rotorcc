@@ -57,6 +57,15 @@ describe('secrets screen — must not cry wolf', () => {
     'password reset emails now use the new template',
     'SECRET=$MY_SECRET',
     'API_KEY={{ vault_lookup }}',
+    // Found by running the screen over real transcripts: code that reads a
+    // secret is not a secret, and an escaped newline is an empty value.
+    "const SECRET = process.env['AUTH_SECRET'] ?? '';",
+    'DB_PASSWORD = os.environ.get("DB_PASSWORD")',
+    'api_key: config.credentials.apiKey',
+    'ANTHROPIC_API_KEY=\\n54\\tCODEX_BIN=codex',
+    'GITHUB_TOKEN=\\r\\nNEXT_LINE=value',
+    'API_KEY=${SOME_OTHER_VARIABLE}',
+    'SERVICE_SECRET=vault:secret/data/service#key',
   ];
 
   it.each(negatives)('leaves %s alone', (text) => {

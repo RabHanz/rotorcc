@@ -53,6 +53,8 @@ export interface CheckpointInput {
    * where context is about to be lost but no code has changed.
    */
   skipLanes?: boolean;
+  /** Leave the off-machine mirror to the scheduled tick. Set by hooks. */
+  skipMirror?: boolean;
   usage?: UsageReading | undefined;
   targetAccount?: number | undefined;
   writeManifest?: boolean;
@@ -222,6 +224,7 @@ export async function performCheckpoint(input: CheckpointInput): Promise<Checkpo
       sessionId: input.session?.id ?? undefined,
       logger,
       dryRun,
+      skipMirror: input.skipMirror === true,
     });
     logger.info('snapshot done', {
       files: result.snapshot.filesCopied,

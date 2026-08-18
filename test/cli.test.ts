@@ -36,6 +36,21 @@ describe('parseArgv', () => {
     expect(parseArgv([]).command).toBe('help');
   });
 
+  it('does not let a boolean flag swallow the positional after it', () => {
+    expect(parseArgv(['init', '--yes', '/home/dev/project'])).toEqual({
+      command: 'init',
+      positionals: ['/home/dev/project'],
+      flags: { yes: true },
+    });
+    expect(parseArgv(['install-hooks', '--user', '/home/dev/project']).positionals).toEqual([
+      '/home/dev/project',
+    ]);
+    expect(parseArgv(['daemon', '--once', '--config', '/a.json']).flags).toEqual({
+      once: true,
+      config: '/a.json',
+    });
+  });
+
   it('does not mistake a leading flag for a command', () => {
     expect(parseArgv(['--help'])).toEqual({
       command: 'help',

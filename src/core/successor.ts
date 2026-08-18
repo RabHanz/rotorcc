@@ -26,6 +26,12 @@ export interface LaunchContext {
   cwd: string;
   prompt: string;
   dryRun: boolean;
+  /**
+   * Terminal target the predecessor is running in, when it was identifiable.
+   * The successor opens beside it, because that is the window the operator is
+   * already looking at.
+   */
+  preferTarget?: string | undefined;
 }
 
 export interface LaunchResult {
@@ -50,8 +56,24 @@ async function tmux(config: Config, args: string[], timeoutMs = 20_000) {
   return run([...config.commands.tmux, ...args], { timeoutMs, okCodes: [1] });
 }
 
-/** The attached session if there is one, else the first, else null. */
-export async function pickTmuxSession(config: Config): Promise<string | null> {
+/**
+ * Which tmux session to open the successor in, in order of preference:
+ *
+ *   1. the predecessor's own session — the operator is already looking at it;
+ *   2. an attached session — somebody is looking at that one;
+ *   3. the first session that exists.
+ *
+ * The predecessor's session matters more than "attached" and this is why: on a
+ * machine where the terminal has been detached (a closed laptop lid, a
+ * disconnected editor), nothing is attached, and picking the first session by
+ * name drops the replacement into whatever happens to sort first — measured
+ * here as an unrelated scratch session the operator never opens.
+ */
+export async function pickTmuxSession(
+  config: Config,
+  preferTarget?: string | undefined,
+): Promise<string | null> {
+  const preferred = preferTarget?.split(':')[0];
   const listed = await tmux(config, [
     'list-sessions',
     '-F',
@@ -65,6 +87,9 @@ export async function pickTmuxSession(config: Config): Promise<string | null> {
       const [name = '', state = ''] = l.split('\t');
       return { name, attached: state === 'attached' };
     });
+  if (preferred !== undefined && preferred !== '' && rows.some((r) => r.name === preferred)) {
+    return preferred;
+  }
   return rows.find((r) => r.attached)?.name ?? rows[0]?.name ?? null;
 }
 
@@ -80,7 +105,7 @@ async function launchTmux(ctx: LaunchContext): Promise<LaunchResult> {
 
   let session = config.successor.session;
   if (session === '') {
-    session = (await pickTmuxSession(config)) ?? '';
+    session = (await pickTmuxSession(config, ctx.preferTarget)) ?? '';
   }
 
   if (ctx.dryRun) {

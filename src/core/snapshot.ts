@@ -110,6 +110,16 @@ export interface SnapshotOptions {
   logger: Logger;
   /** Skip the git commit and the mirror; still reports what it would do. */
   dryRun?: boolean;
+  /**
+   * Do not attempt the off-machine mirror on this snapshot.
+   *
+   * Set for hook-triggered checkpoints. The mirror is a backup of a backup: its
+   * failure never endangers work, but its SLOWNESS does endanger the tool. A
+   * mirror target that has run out of disk once blocked a checkpoint here for
+   * 135 seconds, long enough for the next hook's checkpoint to stack behind it.
+   * The scheduled tick mirrors instead — it already runs alone, under a lock.
+   */
+  skipMirror?: boolean;
 }
 
 function shouldSkip(relativePath: string, excludes: string[]): boolean {
@@ -255,13 +265,10 @@ export async function snapshot(options: SnapshotOptions): Promise<SnapshotResult
     }
   }
 
-  const mirror = await runMirror({
-    config,
-    sources,
-    secretHits,
-    logger,
-    dryRun,
-  });
+  const mirror =
+    options.skipMirror === true
+      ? { attempted: false, ok: true, detail: 'mirror deferred to the scheduled tick' }
+      : await runMirror({ config, sources, secretHits, logger, dryRun });
 
   await maybeGc(config, logger, dryRun);
 

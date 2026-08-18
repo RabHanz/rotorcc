@@ -6,7 +6,7 @@
  * verbs and six flags, and a dependency-free CLI is one fewer thing that can
  * break an install on a machine somebody is mid-crisis on.
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,6 +39,27 @@ interface Argv {
   flags: Record<string, string | boolean>;
 }
 
+/**
+ * Flags that never take a value.
+ *
+ * Without this list, `rotorcc install-hooks --user /path` reads `/path` as the
+ * value of `--user` and then reports no project. Guessing from what follows is
+ * exactly the bug that makes CLIs annoying, so the boolean flags are declared.
+ */
+const BOOLEAN_FLAGS = new Set([
+  'yes',
+  'user',
+  'dry-run',
+  'json',
+  'once',
+  'inline',
+  'verbose',
+  'quiet',
+  'clear',
+  'help',
+  'version',
+]);
+
 export function parseArgv(argv: string[]): Argv {
   // `rotorcc --version` has no command; do not report "--version" as one.
   const leadsWithFlag = argv[0]?.startsWith('-') === true;
@@ -54,9 +75,11 @@ export function parseArgv(argv: string[]): Argv {
       const [name = '', inline] = token.slice(2).split('=', 2);
       if (inline !== undefined) {
         flags[name] = inline;
+      } else if (BOOLEAN_FLAGS.has(name)) {
+        flags[name] = true;
       } else {
         const next = rest[i + 1];
-        if (next !== undefined && !next.startsWith('--')) {
+        if (next !== undefined && !next.startsWith('-')) {
           flags[name] = next;
           i += 1;
         } else {
@@ -136,22 +159,36 @@ function contextFor(flags: Record<string, string | boolean>): {
   return { config, store, logger, dryRun, configPath };
 }
 
+/**
+ * The path to record in a hook entry or a scheduler unit.
+ *
+ * Resolved through the symlink deliberately. A global npm install puts a link
+ * on PATH, and links get replaced on upgrade or removed on uninstall; a hook
+ * pointing at a dangling link fails silently every time the agent stops. The
+ * real file survives both.
+ */
 function resolveBinary(): string {
   const entry = process.argv[1];
   if (entry === undefined) return 'rotorcc';
-  return resolve(entry);
+  try {
+    return realpathSync(entry);
+  } catch {
+    return resolve(entry);
+  }
 }
 
 async function main(): Promise<number> {
   const argv = parseArgv(process.argv.slice(2));
   const { command, positionals, flags } = argv;
 
-  if (flags.help === true || flags.h === true || command === 'help') {
-    out(HELP);
-    return 0;
-  }
+  // Version first: `rotorcc --version` has no command, and the help fallback
+  // below would otherwise swallow it and print the whole manual.
   if (flags.version === true || flags.v === true || command === 'version') {
     out(VERSION);
+    return 0;
+  }
+  if (flags.help === true || flags.h === true || command === 'help') {
+    out(HELP);
     return 0;
   }
 
@@ -162,6 +199,7 @@ async function main(): Promise<number> {
         event,
         configPath: typeof flags.config === 'string' ? flags.config : undefined,
         inline: flags.inline === true,
+        payloadFile: typeof flags['payload-file'] === 'string' ? flags['payload-file'] : undefined,
       });
       if (result.stdout !== null) process.stdout.write(`${result.stdout}\n`);
       // A hook never blocks the tool loop, whatever went wrong inside it.
@@ -208,9 +246,14 @@ async function main(): Promise<number> {
     case 'uninstall-scheduler': {
       const ctx = contextFor(flags);
       const plan = schedulerPlan({
-        binary: resolveBinary(),
+        // The node running this install, and the script it is running, both by
+        // absolute path: a scheduled unit does not inherit this shell's PATH,
+        // and a version-managed node is invisible without it.
+        node: process.execPath,
+        script: resolveBinary(),
         args: ctx.configPath === undefined ? [] : ['--config', ctx.configPath],
         pollSeconds: ctx.config.pollSeconds,
+        path: process.env.PATH ?? '',
       });
       const uninstalling = command === 'uninstall-scheduler';
       out(`scheduler: ${plan.kind}`);
@@ -403,9 +446,29 @@ async function main(): Promise<number> {
   }
 }
 
-const isDirectRun =
-  process.argv[1] !== undefined &&
-  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+/**
+ * True when this file is the program being run, rather than an import.
+ *
+ * Both sides go through `realpathSync`, and that is the whole point: a global
+ * npm install puts a SYMLINK on the PATH, so `process.argv[1]` is the link and
+ * `import.meta.url` is the target. Comparing them unresolved makes every
+ * globally installed copy start up, do nothing, and exit 0 — which is exactly
+ * what happened the first time this was installed for real.
+ */
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  const canonical = (path: string): string => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  return canonical(entry) === canonical(fileURLToPath(import.meta.url));
+}
+
+const isDirectRun = isEntryPoint();
 
 if (isDirectRun) {
   main()

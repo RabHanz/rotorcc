@@ -41,12 +41,14 @@ jobs:
       - run: npm run build
 
       # A packaged tarball that does not actually run is the classic release
-      # bug, so the built CLI is executed from a clean install of the pack.
+      # bug. This installs the pack globally and runs the BIN SHIM, not the
+      # file: a global install puts a symlink on PATH, and an entry-point check
+      # that does not resolve symlinks makes the shim a silent no-op.
       - name: Smoke-test the packed CLI
         shell: bash
         run: |
           npm pack --silent
-          mkdir -p /tmp/rotorcc-smoke
-          npm install --no-save --prefix /tmp/rotorcc-smoke ./rotorcc-*.tgz
-          node /tmp/rotorcc-smoke/node_modules/rotorcc/dist/cli.js --version
-          node /tmp/rotorcc-smoke/node_modules/rotorcc/dist/cli.js --help | head -3
+          npm install --global ./rotorcc-*.tgz
+          test "$(rotorcc --version)" = "$(node -p "require('./package.json').version")"
+          rotorcc --help | head -3
+          rotorcc doctor --json || true   # no config yet: must fail cleanly, not crash

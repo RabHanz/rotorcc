@@ -61,11 +61,29 @@ export const DEFAULT_PATTERNS: SecretPattern[] = [
   {
     id: 'credential-assignment',
     // NAME=value where NAME reads like a credential and the value is long
-    // enough to be a real one. Placeholders and obvious redactions are excluded
-    // so the screen stays believable; a screen nobody believes gets turned off.
+    // enough to be a real one.
+    //
+    // The exclusions are not decoration. Run this over a few hundred megabytes
+    // of real agent transcripts and, without them, it fires on:
+    //
+    //   const SECRET = process.env['AUTH_SECRET']      code that READS a secret
+    //   ANTHROPIC_API_KEY=\n54\tCODEX_BIN=codex        a deliberately empty
+    //                                                  value, where the JSONL
+    //                                                  escape "\n" is two
+    //                                                  literal characters and
+    //                                                  so does not look blank
+    //   API_KEY=<your-key-here>                        a placeholder
+    //
+    // Each of those is a false alarm, and enough false alarms is how a screen
+    // ends up switched off.
     regex: new RegExp(
       String.raw`\b[A-Z0-9_]{0,40}(?:API_KEY|SECRET_KEY|ACCESS_KEY|ACCESS_TOKEN|AUTH_TOKEN|REFRESH_TOKEN|PRIVATE_KEY|PASSWORD|PASSWD|SECRET|CREDENTIALS?)\s*[=:]\s*["']?` +
+        // not a placeholder, a redaction or a literal
         String.raw`(?!(?:x{4,}|X{4,}|\*{3,}|\.{3,}|redacted|REDACTED|changeme|CHANGEME|your[-_]|example|EXAMPLE|placeholder|PLACEHOLDER|null|None|true|false)[^A-Za-z0-9]?)` +
+        // not an escaped newline or tab standing in for an empty value
+        String.raw`(?!\\[nrt])` +
+        // not a lookup of the secret from somewhere else
+        String.raw`(?!(?:process\.env|os\.environ|Deno\.env|System\.getenv|getenv|ENV\[|env\[|env\.|config\.|vault|secrets?\.|\$\{))` +
         String.raw`[^\s"',;<>{}$]{12,}`,
     ),
     description: 'credential-shaped assignment with a real-looking value',

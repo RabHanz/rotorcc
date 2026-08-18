@@ -260,6 +260,7 @@ async function rotate(
     cwd,
     prompt,
     dryRun: ctx.dryRun,
+    preferTarget: predecessor ?? undefined,
   });
   logger.info('successor launch', {
     ok: launch.ok,

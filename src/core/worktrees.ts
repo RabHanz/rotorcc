@@ -227,12 +227,37 @@ export async function discoverTrees(
     }
   }
 
-  const statuses: TreeStatus[] = [];
-  for (const { path, isMainTree } of selected) {
-    const status = await inspectTree(ctx, path, project, isMainTree);
-    if (status !== null) statuses.push(status);
-  }
-  return statuses;
+  // Inspecting one tree is six git calls. A project with fifty agent worktrees
+  // is three hundred, and done one at a time that is minutes of wall clock in
+  // the middle of a checkpoint. Bounded rather than unbounded because this runs
+  // on the machine somebody is working on, and a fork bomb of git processes is
+  // not an improvement.
+  const statuses = await mapWithConcurrency(selected, TREE_CONCURRENCY, ({ path, isMainTree }) =>
+    inspectTree(ctx, path, project, isMainTree),
+  );
+  return statuses.filter((s): s is TreeStatus => s !== null);
+}
+
+/** How many trees are inspected or checkpointed at once. */
+export const TREE_CONCURRENCY = 4;
+
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index] as T, index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 export interface CheckpointOptions {
@@ -317,10 +342,12 @@ export async function checkpointProject(
   options: CheckpointOptions,
 ): Promise<{ trees: TreeStatus[]; outcomes: CheckpointOutcome[] }> {
   const trees = await discoverTrees(ctx, project);
-  const outcomes: CheckpointOutcome[] = [];
-  for (const tree of trees) {
-    outcomes.push(await checkpointTree(ctx, tree, options));
-  }
+  // Each tree is its own working directory and its own branch, so there is no
+  // index to contend over. Pushes to a shared remote in parallel are fine: they
+  // touch different refs, and git serialises what it must.
+  const outcomes = await mapWithConcurrency(trees, TREE_CONCURRENCY, (tree) =>
+    checkpointTree(ctx, tree, options),
+  );
   return { trees, outcomes };
 }
 

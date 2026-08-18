@@ -8,9 +8,11 @@ import { describe, expect, it } from 'vitest';
 import { schedulerPlan } from '../src/core/scheduler.js';
 
 const input = {
-  binary: '/usr/local/bin/rotorcc',
+  node: '/home/dev/.nvm/versions/node/v22.0.0/bin/node',
+  script: '/home/dev/.npm-global/lib/node_modules/rotorcc/dist/cli.js',
   args: ['--config', '/home/dev/.config/rotorcc/config.json'],
   pollSeconds: 60,
+  path: '/home/dev/.nvm/versions/node/v22.0.0/bin:/home/dev/.local/bin:/usr/bin:/bin',
   home: '/home/dev',
 };
 
@@ -28,7 +30,27 @@ describe('schedulerPlan — linux', () => {
   it('runs a one-shot tick, not a resident process', () => {
     const service = plan.files[0]?.contents ?? '';
     expect(service).toContain('Type=oneshot');
-    expect(service).toContain('ExecStart=/usr/local/bin/rotorcc daemon --once --config');
+    expect(service).toContain('daemon" "--once"');
+  });
+
+  it('pins the absolute node binary, because a user unit has no version manager', () => {
+    const service = plan.files[0]?.contents ?? '';
+    expect(service).toContain(`ExecStart="${input.node}" "${input.script}"`);
+    expect(service).not.toMatch(/ExecStart=node /);
+    expect(service).not.toContain('/usr/bin/env');
+  });
+
+  it('gives the unit a PATH, because it shells out to git and the switcher', () => {
+    expect(plan.files[0]?.contents).toContain(`Environment=PATH=${input.path}`);
+  });
+
+  it('quotes the ExecStart words, so a path with a space survives', () => {
+    const spaced = schedulerPlan({
+      ...input,
+      platform: 'linux',
+      script: '/home/dev/My Tools/rotorcc/dist/cli.js',
+    });
+    expect(spaced.files[0]?.contents).toContain('"/home/dev/My Tools/rotorcc/dist/cli.js"');
   });
 
   it('takes the leftovers of a machine somebody is working on', () => {
@@ -77,10 +99,17 @@ describe('schedulerPlan — macOS', () => {
 
   it('puts each argument in its own string element, so paths with spaces survive', () => {
     const plist = plan.files[0]?.contents ?? '';
-    expect(plist).toContain('<string>/usr/local/bin/rotorcc</string>');
+    expect(plist).toContain(`<string>${input.node}</string>`);
+    expect(plist).toContain(`<string>${input.script}</string>`);
     expect(plist).toContain('<string>daemon</string>');
     expect(plist).toContain('<string>--once</string>');
     expect(plist).toContain('<integer>60</integer>');
+  });
+
+  it('sets PATH, because a LaunchAgent starts as bare as a systemd user unit', () => {
+    const plist = plan.files[0]?.contents ?? '';
+    expect(plist).toContain('<key>EnvironmentVariables</key>');
+    expect(plist).toContain(`<string>${input.path}</string>`);
   });
 
   it('escapes XML rather than producing an invalid plist', () => {
@@ -100,6 +129,16 @@ describe('schedulerPlan — Windows', () => {
     expect(plan.commands[0]).toContain('/SC');
     expect(plan.commands[0]).toContain('MINUTE');
     expect(plan.commands[0]).toContain('rotorcc-watch');
+    expect(plan.commands[0]?.[plan.commands[0].indexOf('/TR') + 1]).toContain(input.node);
+  });
+
+  it('quotes a command path containing a space', () => {
+    const plan = schedulerPlan({
+      ...input,
+      platform: 'win32',
+      script: 'C:\\Program Files\\rotorcc\\cli.js',
+    });
+    expect(plan.commands[0]?.join(' ')).toContain('"C:\\Program Files\\rotorcc\\cli.js"');
   });
 
   it('says out loud when it had to round the interval', () => {
@@ -121,6 +160,6 @@ describe('schedulerPlan — anything else', () => {
     expect(plan.kind).toBe('foreground');
     expect(plan.files).toEqual([]);
     expect(plan.commands).toEqual([]);
-    expect(plan.notes.join(' ')).toContain('rotorcc daemon');
+    expect(plan.notes.join(' ')).toContain(`${input.node} ${input.script} daemon`);
   });
 });

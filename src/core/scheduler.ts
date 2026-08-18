@@ -31,24 +31,48 @@ export interface SchedulerPlan {
 }
 
 export interface SchedulerInput {
-  /** Absolute path to the rotorcc executable. */
-  binary: string;
+  /**
+   * Absolute path to the node binary running the installer.
+   *
+   * Not "node". A systemd user unit and a launchd agent both start with a
+   * minimal environment, and a version manager (nvm, fnm, volta) puts node
+   * somewhere that minimal PATH has never heard of. The unit that shipped
+   * before this was pinned failed on first tick with
+   * `/usr/bin/env: 'node': No such file or directory`.
+   */
+  node: string;
+  /** Absolute path to the CLI entry script. */
+  script: string;
   /** Extra args, e.g. ['--config', '/path/config.json']. */
   args: string[];
   pollSeconds: number;
+  /**
+   * The PATH to give the scheduled process. Same reasoning: rotorcc shells out
+   * to git and to the account switcher, and a switcher installed in
+   * ~/.local/bin is invisible to a default user-unit PATH.
+   */
+  path?: string;
   home?: string;
   platform?: ReturnType<typeof currentPlatform>;
 }
 
+/** systemd's ExecStart accepts double-quoted words; a path may contain spaces. */
+function systemdQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function systemdPlan(input: SchedulerInput, home: string): SchedulerPlan {
   const unitDir = join(home, '.config', 'systemd', 'user');
-  const exec = [input.binary, 'daemon', '--once', ...input.args].join(' ');
+  const exec = [input.node, input.script, 'daemon', '--once', ...input.args]
+    .map(systemdQuote)
+    .join(' ');
   const service = [
     '[Unit]',
     'Description=rotorcc watch tick',
     '',
     '[Service]',
     'Type=oneshot',
+    ...(input.path !== undefined && input.path !== '' ? [`Environment=PATH=${input.path}`] : []),
     `ExecStart=${exec}`,
     // A tick that hangs must not stack up behind the next one.
     'TimeoutStartSec=300',
@@ -105,7 +129,7 @@ function systemdPlan(input: SchedulerInput, home: string): SchedulerPlan {
 function launchdPlan(input: SchedulerInput, home: string): SchedulerPlan {
   const label = 'dev.rotorcc.watch';
   const plistPath = join(home, 'Library', 'LaunchAgents', `${label}.plist`);
-  const argv = [input.binary, 'daemon', '--once', ...input.args];
+  const argv = [input.node, input.script, 'daemon', '--once', ...input.args];
   const args = argv.map((a) => `    <string>${escapeXml(a)}</string>`).join('\n');
   const plist = [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -118,6 +142,16 @@ function launchdPlan(input: SchedulerInput, home: string): SchedulerPlan {
     '  <array>',
     args,
     '  </array>',
+    // launchd starts with its own minimal PATH, exactly like systemd does.
+    ...(input.path !== undefined && input.path !== ''
+      ? [
+          '  <key>EnvironmentVariables</key>',
+          '  <dict>',
+          '    <key>PATH</key>',
+          `    <string>${escapeXml(input.path)}</string>`,
+          '  </dict>',
+        ]
+      : []),
     '  <key>StartInterval</key>',
     `  <integer>${input.pollSeconds}</integer>`,
     '  <key>RunAtLoad</key>',
@@ -159,7 +193,10 @@ function schtasksPlan(input: SchedulerInput): SchedulerPlan {
   const name = 'rotorcc-watch';
   // schtasks takes whole minutes, and its floor is 1.
   const minutes = Math.max(1, Math.round(input.pollSeconds / 60));
-  const command = [input.binary, 'daemon', '--once', ...input.args].join(' ');
+  // Task Scheduler takes one command string, so each argument is quoted here.
+  const command = [input.node, input.script, 'daemon', '--once', ...input.args]
+    .map((part) => (/\s/.test(part) ? `"${part}"` : part))
+    .join(' ');
   return {
     kind: 'schtasks',
     files: [],
@@ -204,7 +241,7 @@ export function schedulerPlan(input: SchedulerInput): SchedulerPlan {
     uninstallFiles: [],
     notes: [
       'No scheduler adapter for this platform.',
-      `Run it in a terminal instead: ${[input.binary, 'daemon', ...input.args].join(' ')}`,
+      `Run it in a terminal instead: ${[input.node, input.script, 'daemon', ...input.args].join(' ')}`,
     ],
   };
 }

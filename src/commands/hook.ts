@@ -14,7 +14,7 @@
  *    for context to be injected.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { type Config } from '../config/schema.js';
@@ -33,6 +33,8 @@ export interface HookOptions {
   payloadText?: string | undefined;
   /** Do the heavy work here rather than detaching. Used by the detached child. */
   inline?: boolean;
+  /** Where the detached child finds its payload. Consumed and deleted. */
+  payloadFile?: string | undefined;
 }
 
 export interface HookResult {
@@ -181,28 +183,60 @@ function resumeContext(store: Store): string | null {
 
 /**
  * Re-invoke ourselves detached, so the tool loop is not waiting on a git push
- * over a slow network. The child is fully detached and its output goes to the
- * log file, not to the parent's pipes, so the parent can exit immediately.
+ * over a slow network.
+ *
+ * The payload goes through a file, not a pipe. That looks like the fussier
+ * option and is the opposite: a parent cannot exit until its child's stdin pipe
+ * has been drained, so piping couples the hook's latency to how fast the child
+ * boots — measured at 3.4 seconds on a loaded machine, inside a tool loop with
+ * a two-second budget. Writing a small file and handing over the path costs
+ * about a millisecond and decouples the two completely.
  */
-function detachHeavyWork(event: string, payloadText: string, configPath: string | undefined): void {
+function detachHeavyWork(
+  event: string,
+  payloadText: string,
+  configPath: string | undefined,
+  store: Store,
+): void {
   const args = [process.argv[1] ?? '', 'hook', event, '--inline'];
   if (configPath !== undefined) args.push('--config', configPath);
   try {
+    const relative = join('pending', `${Date.now()}-${process.pid}-${event}.json`);
+    const payloadPath = store.writeAtomic(relative, payloadText);
+    args.push('--payload-file', payloadPath);
     const child = spawn(process.execPath, args, {
       detached: true,
-      stdio: ['pipe', 'ignore', 'ignore'],
+      stdio: 'ignore',
       windowsHide: true,
     });
-    child.stdin.write(payloadText);
-    child.stdin.end();
     child.unref();
   } catch {
     /* if the child cannot start, the next hook or daemon tick still covers it */
   }
 }
 
+function readPayloadFile(path: string): string {
+  try {
+    const text = readFileSync(path, 'utf8');
+    // Consume it: a pending payload left on disk would be reprocessed by
+    // nothing, but it would accumulate, and stale state is its own bug.
+    try {
+      unlinkSync(path);
+    } catch {
+      /* another run got there first */
+    }
+    return text;
+  } catch {
+    return '';
+  }
+}
+
 export async function runHook(options: HookOptions): Promise<HookResult> {
-  const payloadText = options.payloadText ?? readStdin();
+  const payloadText =
+    options.payloadText ??
+    (options.payloadFile !== undefined && options.payloadFile !== ''
+      ? readPayloadFile(options.payloadFile)
+      : readStdin());
   const parsed = parseHookPayload(payloadText, options.event);
 
   let config: Config;
@@ -268,7 +302,7 @@ export async function runHook(options: HookOptions): Promise<HookResult> {
   const wantsWork = CHECKPOINT_EVENTS.has(event) || SNAPSHOT_ONLY_EVENTS.has(event);
   if (wantsWork && !debounced(store, config, event)) {
     markCheckpointed(store);
-    detachHeavyWork(event, payloadText, options.configPath);
+    detachHeavyWork(event, payloadText, options.configPath, store);
   }
 
   const response = renderHookResponse(event, {
@@ -300,6 +334,10 @@ async function runHeavyWork(
       writeManifest: event === 'SessionEnd',
       cleanExit: event === 'SessionEnd',
       skipLanes: snapshotOnly,
+      // The local copy is what protects the work. The off-machine mirror is a
+      // backup of a backup, and it is left to the scheduled tick so that a slow
+      // or full target can never stall a checkpoint behind it.
+      skipMirror: true,
       session: {
         id: payload.session_id ?? null,
         transcriptPath: payload.transcript_path ?? null,

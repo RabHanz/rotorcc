@@ -114,8 +114,12 @@ export class Store {
 
   /**
    * A directory-based lock: `mkdir` is atomic on every filesystem rotorcc runs
-   * on, where an O_EXCL file is not reliably so over network mounts. A lock
-   * older than `staleSeconds` is broken, because the holder was killed.
+   * on, where an O_EXCL file is not reliably so over network mounts.
+   *
+   * A held lock is broken in two cases: the owning process is gone, or the lock
+   * is older than `staleSeconds`. The liveness check matters more than the
+   * timeout — a killed holder would otherwise block every checkpoint for the
+   * whole stale window, which is precisely the moment work most needs saving.
    */
   acquireLock(name: string, staleSeconds = 600): boolean {
     const dir = this.path('locks', name);
@@ -123,9 +127,8 @@ export class Store {
     try {
       mkdirSync(dir);
     } catch {
+      if (!this.lockIsDead(dir, staleSeconds)) return false;
       try {
-        const age = (Date.now() - statSync(dir).mtimeMs) / 1000;
-        if (age < staleSeconds) return false;
         rmSync(dir, { recursive: true, force: true });
         mkdirSync(dir);
       } catch {
@@ -138,6 +141,32 @@ export class Store {
       /* the lock is the directory; the owner note is a courtesy */
     }
     return true;
+  }
+
+  private lockIsDead(dir: string, staleSeconds: number): boolean {
+    try {
+      // Clamped at zero: a filesystem mtime can read a hair ahead of
+      // `Date.now()` (different clock sources, different rounding), and a
+      // negative age made a zero stale window fail to expire anything.
+      const age = Math.max(0, (Date.now() - statSync(dir).mtimeMs) / 1000);
+      if (age >= staleSeconds) return true;
+    } catch {
+      return true;
+    }
+    try {
+      const pid = Number.parseInt(
+        readFileSync(join(dir, 'owner'), 'utf8').split('\n')[0] ?? '',
+        10,
+      );
+      if (!Number.isFinite(pid) || pid <= 0) return false;
+      if (pid === process.pid) return false;
+      // Signal 0 tests for existence without touching the process. ESRCH means
+      // the owner is gone; EPERM means it exists and belongs to someone else.
+      process.kill(pid, 0);
+      return false;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === 'ESRCH';
+    }
   }
 
   releaseLock(name: string): void {
