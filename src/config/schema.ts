@@ -187,6 +187,41 @@ export const configSchema = z.object({
   /** The git repository rotorcc copies transcripts into. */
   storePath: z.string().min(1),
 
+  /**
+   * Where rotorcc keeps the accounts it manages.
+   *
+   * Empty means the platform default (see `appPaths().accountsDir`). Set it to
+   * put the account store on an encrypted volume, or to run a second isolated
+   * rotorcc on one machine. It holds credentials, so it is created 0700 and
+   * every file in it 0600; do not point it at a synced folder.
+   */
+  accountsDir: z.string().default(''),
+
+  /**
+   * How a rotation target is chosen.
+   *
+   *   work-aware      the default, and rotorcc's reason for existing: prefer a
+   *                   target with enough headroom to FINISH what is running,
+   *                   and refuse rather than move onto one that would run out
+   *                   mid-task.
+   *   best            most headroom wins.
+   *   next-available  the next slot in order, skipping exhausted ones.
+   *   consume-first   soonest-resetting window first, to spend quota that is
+   *                   about to be thrown away.
+   */
+  strategy: z.enum(['work-aware', 'best', 'next-available', 'consume-first']).default('work-aware'),
+
+  /**
+   * Refuse to rotate while work is unsaved.
+   *
+   * On by default. rotorcc checkpoints first and re-checks; anything still
+   * unsaved after that is something it could not save — a protected branch, a
+   * tree mid-rebase, a branch with no remote — and rotating past it ends the
+   * session that owns the work. Turning this off makes rotorcc behave like a
+   * plain account switcher, which is a choice, not a default.
+   */
+  refuseRotationWithUnsavedWork: z.boolean().default(true),
+
   mirror: mirrorSchema.default({ type: 'none' }),
 
   thresholds: z

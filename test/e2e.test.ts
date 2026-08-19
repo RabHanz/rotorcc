@@ -146,6 +146,11 @@ beforeEach(() => {
     version: 1,
     claudeHome,
     storePath: join(root, 'store'),
+    // Pointed at a temp directory on purpose. Without it these tests would read
+    // whatever accounts the developer running them actually has, and a suite
+    // that reaches for real credentials — or the network behind them — is a
+    // suite that fails differently on every machine.
+    accountsDir: join(root, 'accounts'),
     projects: [
       {
         path: repo,
@@ -499,7 +504,12 @@ describe('end to end', () => {
     });
     const result = await tick(ctx());
     expect(result.ok).toBe(false);
-    expect(result.detail).toContain('usage source');
+    // The failure has to be legible AND actionable. A machine with no rotorcc
+    // accounts of its own falling back to a broken external switcher is the
+    // exact state that has to name its own remedy, or the operator is left
+    // watching a tool that silently does nothing.
+    expect(result.detail).toContain('rotorcc manages no accounts of its own');
+    expect(result.detail).toContain('rotorcc accounts import');
     expect(git(repo, 'status', '--porcelain')).toBe('');
   });
 

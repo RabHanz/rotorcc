@@ -1,0 +1,715 @@
+/**
+ * `rotorcc accounts …` — the account management surface.
+ *
+ * Every command here has a `--json` form and every one of them reports what it
+ * refused to do as clearly as what it did. Two conventions hold throughout:
+ *
+ *   - **Unknown headroom prints the word `unknown`**, in the table and in the
+ *     JSON alike, with the reason. `null` in JSON, never `0`.
+ *   - **A destructive command names what it is about to destroy** and requires
+ *     `--yes` when the answer is not obviously recoverable.
+ *
+ * Nothing in this file prints a credential. `accounts export` is the one
+ * command that moves credential bytes, and it says what it is doing in a way
+ * that cannot be mistaken for a metadata dump.
+ */
+import { existsSync, readFileSync } from 'node:fs';
+
+import type { Config } from '../config/schema.js';
+import { AccountManager } from '../accounts/manager.js';
+import { writeJsonAtomic } from '../accounts/atomic.js';
+import {
+  type Secret,
+  asSecret,
+  classifyCredential,
+  credentialFingerprint,
+} from '../accounts/credentials.js';
+import { importFromCswap } from '../accounts/importCswap.js';
+import { MappingStore } from '../accounts/mappings.js';
+import {
+  type RosterSlot,
+  nextFreeSlot,
+  normaliseAlias,
+  resolveIdentifier,
+  slotLabel,
+  slots,
+  swapSlots,
+} from '../accounts/roster.js';
+import { selectTarget, type Strategy } from '../accounts/select.js';
+import { switchAccount } from '../accounts/switch.js';
+import { headroomIsKnown } from '../core/usage.js';
+import { formatAge } from '../accounts/manager.js';
+
+export interface AccountsContext {
+  config: Config;
+  manager: AccountManager;
+  dryRun: boolean;
+  json: boolean;
+  yes: boolean;
+  out: (line: string) => void;
+}
+
+/** `rotorcc accounts` / `accounts list`. */
+export async function listAccounts(ctx: AccountsContext, force = false): Promise<number> {
+  const reading = await ctx.manager.readUsage({ force });
+
+  if (ctx.json) {
+    ctx.out(
+      JSON.stringify(
+        {
+          activeAccount: reading.activeAccountNumber,
+          activeDetection: reading.activeDetectionReason ?? null,
+          observedAt: reading.observedAt,
+          accounts: reading.accounts.map((a) => ({
+            slot: a.number,
+            email: a.email ?? null,
+            alias: a.alias ?? null,
+            active: a.active,
+            disabled: a.disabled ?? false,
+            kind: a.kind ?? 'oauth',
+            // null, never 0. A consumer that sees 0 will treat it as exhausted.
+            headroomPct: headroomIsKnown(a) ? a.headroomPct : null,
+            headroomKnown: headroomIsKnown(a),
+            unknownReason: headroomIsKnown(a) ? null : (a.unknownReason ?? 'not measured'),
+            bindingWindow: headroomIsKnown(a) ? a.bindingWindow : null,
+            bindingResetsAt: a.bindingResetsAt ?? null,
+            usageAgeSeconds:
+              a.usageAgeMs === null || a.usageAgeMs === undefined
+                ? null
+                : Math.round(a.usageAgeMs / 1000),
+            windows: a.windows.map((w) => ({
+              name: w.name,
+              headroomPct: w.headroomPct,
+              resetsAt: w.resetsAt ?? null,
+            })),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+
+  if (reading.accounts.length === 0) {
+    ctx.out('rotorcc manages no accounts yet.');
+    ctx.out('');
+    ctx.out('  rotorcc accounts add                    capture the login Claude Code is using now');
+    ctx.out('  rotorcc accounts import --from-cswap    bring across an existing switcher\'s accounts');
+    return 0;
+  }
+
+  for (const account of reading.accounts) {
+    const marker = account.active ? '>' : ' ';
+    const label = account.alias ?? account.email ?? `account ${account.number}`;
+    const tags =
+      (account.disabled === true ? ' [disabled]' : '') +
+      (account.kind === 'api-key' ? ' [api-key]' : '');
+
+    if (!headroomIsKnown(account)) {
+      ctx.out(
+        `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
+          `${'unknown'.padEnd(22)} ${account.unknownReason ?? 'not measured'}${tags}`,
+      );
+      continue;
+    }
+    const resets =
+      account.bindingResetsAt === undefined
+        ? ''
+        : ` · resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`;
+    const age =
+      account.usageAgeMs === null || account.usageAgeMs === undefined
+        ? ''
+        : ` · ${formatAge(account.usageAgeMs)} old`;
+    ctx.out(
+      `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
+        `${`${account.headroomPct.toFixed(0)}% left`.padEnd(10)} ` +
+        `(${account.bindingWindow})${resets}${age}${tags}`,
+    );
+  }
+
+  if (reading.activeAccountNumber === null && reading.activeDetectionReason !== undefined) {
+    ctx.out('');
+    ctx.out(`  active account not identified: ${reading.activeDetectionReason}`);
+  }
+  return 0;
+}
+
+/** `rotorcc accounts add` — capture the login Claude Code is using right now. */
+export async function addAccount(
+  ctx: AccountsContext,
+  options: { slot?: number; email?: string; alias?: string },
+): Promise<number> {
+  const live = await ctx.manager.credentials.readActive();
+  if (live.kind === 'unreadable') {
+    ctx.out(`cannot add: the live credential could not be read — ${live.detail}`);
+    return 1;
+  }
+  if (live.kind === 'absent') {
+    ctx.out('cannot add: there is no Claude Code credential on this machine.');
+    ctx.out('Log in with Claude Code first, then run this again.');
+    return 1;
+  }
+  if (live.degraded) {
+    // These bytes may be a superseded generation. Stashing them would create a
+    // slot holding a refresh token that is already spent — an account that
+    // looks fine until the first time it is needed.
+    ctx.out('cannot add: the live credential was read from a fallback backend and may be stale.');
+    ctx.out('Adding it could store a credential that is already superseded. Retry in a moment.');
+    return 1;
+  }
+
+  const roster = ctx.manager.roster.read();
+  const fingerprint = credentialFingerprint(live.value);
+  for (const existing of slots(roster)) {
+    const stash = await ctx.manager.credentials.readStash(existing.slot, existing.email);
+    if (stash.kind === 'found' && credentialFingerprint(stash.value) === fingerprint) {
+      ctx.out(
+        `this login is already slot ${existing.slot} (${slotLabel(existing)}); nothing to do`,
+      );
+      return 0;
+    }
+  }
+
+  const config = ctx.manager.credentials.readGlobalConfig();
+  const identity = config?.oauthAccount ?? null;
+  const identityRecord =
+    typeof identity === 'object' && identity !== null ? (identity as Record<string, unknown>) : {};
+
+  const email =
+    options.email ??
+    (typeof identityRecord.emailAddress === 'string' ? identityRecord.emailAddress : undefined) ??
+    (typeof identityRecord.email === 'string' ? identityRecord.email : undefined);
+  if (email === undefined || email === '') {
+    ctx.out('cannot add: could not determine this login\'s email from Claude Code\'s config.');
+    ctx.out('Pass it explicitly:  rotorcc accounts add --email you@example.com');
+    return 1;
+  }
+
+  const slot = options.slot ?? nextFreeSlot(roster);
+  if (roster.accounts[String(slot)] !== undefined && !ctx.yes) {
+    ctx.out(`slot ${slot} is already taken by ${roster.accounts[String(slot)]?.email ?? '?'}.`);
+    ctx.out('Pass --yes to overwrite it, or choose another with --slot.');
+    return 1;
+  }
+
+  let alias = '';
+  if (options.alias !== undefined) alias = normaliseAlias(options.alias);
+
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would add ${email} as slot ${slot}. Nothing was written.`);
+    return 0;
+  }
+
+  await ctx.manager.credentials.writeStash(slot, email, live.value);
+  if (identity !== null) ctx.manager.credentials.writeAccountIdentity(slot, email, identity);
+  ctx.manager.roster.update((r) => {
+    r.accounts[String(slot)] = {
+      email,
+      uuid: typeof identityRecord.accountUuid === 'string' ? identityRecord.accountUuid : '',
+      organizationUuid:
+        typeof identityRecord.organizationUuid === 'string' ? identityRecord.organizationUuid : '',
+      organizationName:
+        typeof identityRecord.organizationName === 'string' ? identityRecord.organizationName : '',
+      added: new Date().toISOString(),
+      alias,
+      disabled: false,
+      kind: classifyCredential(live.value) === 'api-key' ? 'api-key' : 'oauth',
+    };
+    r.activeSlot = slot;
+  });
+
+  ctx.out(`added ${email} as slot ${slot}${alias === '' ? '' : ` (alias "${alias}")`}`);
+  return 0;
+}
+
+/** `rotorcc accounts add-token [TOKEN|-]` — register a setup token or API key. */
+export async function addToken(
+  ctx: AccountsContext,
+  options: { token?: string; slot?: number; email?: string; alias?: string },
+): Promise<number> {
+  let raw = options.token;
+  if (raw === undefined || raw === '-') {
+    // Reading from stdin is the recommended path and the default when no
+    // argument is given: a token on the command line is visible in the shell
+    // history and in `ps` output for every user on the machine.
+    raw = readAllStdin();
+  }
+  const token = (raw ?? '').trim();
+  if (token === '') {
+    ctx.out('no token supplied. Pipe one in:  echo "$TOKEN" | rotorcc accounts add-token -');
+    return 1;
+  }
+
+  const kind = classifyCredential(token);
+  let credential: Secret;
+  if (kind === 'api-key') {
+    credential = asSecret(token);
+  } else if (kind === 'oauth') {
+    credential = asSecret(token);
+  } else if (token.startsWith('sk-ant-oat')) {
+    // A bare setup token. Wrap it in the credential envelope Claude Code reads.
+    credential = asSecret(JSON.stringify({ claudeAiOauth: { accessToken: token, scopes: [] } }));
+  } else {
+    ctx.out('that does not look like a setup token, an API key, or a credential object.');
+    ctx.out('Expected an sk-ant-oat… token, an sk-ant-api… key, or a credentials JSON object.');
+    return 1;
+  }
+
+  const roster = ctx.manager.roster.read();
+  const slot = options.slot ?? nextFreeSlot(roster);
+  const isApiKey = kind === 'api-key';
+  const email =
+    options.email ??
+    `${isApiKey ? 'api-key' : 'setup-token'}-${slot}@token.local`;
+
+  if (roster.accounts[String(slot)] !== undefined && !ctx.yes) {
+    ctx.out(`slot ${slot} is already taken. Pass --yes to overwrite it, or choose --slot.`);
+    return 1;
+  }
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would register a ${isApiKey ? 'managed API key' : 'setup token'} as slot ${slot}.`);
+    return 0;
+  }
+
+  await ctx.manager.credentials.writeStash(slot, email, credential);
+  ctx.manager.roster.update((r) => {
+    r.accounts[String(slot)] = {
+      email,
+      uuid: '',
+      organizationUuid: '',
+      organizationName: '',
+      added: new Date().toISOString(),
+      alias: options.alias === undefined ? '' : normaliseAlias(options.alias),
+      disabled: false,
+      kind: isApiKey ? 'api-key' : 'oauth',
+    };
+  });
+
+  ctx.out(`registered slot ${slot} (${email})`);
+  if (isApiKey) {
+    ctx.out(
+      'note: API-key accounts bill per token and have no quota window, so rotorcc will never ' +
+        'rotate onto this one automatically. Name it explicitly to use it.',
+    );
+  }
+  return 0;
+}
+
+export async function removeAccount(ctx: AccountsContext, identifier: string): Promise<number> {
+  const found = requireSlot(ctx, identifier);
+  if (found === null) return 1;
+  if (!ctx.yes) {
+    ctx.out(`this removes slot ${found.slot} (${slotLabel(found)}) and its stored credential.`);
+    ctx.out('If this is the only copy of that login, you will have to log in again to get it back.');
+    ctx.out('Re-run with --yes to confirm.');
+    return 1;
+  }
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would remove slot ${found.slot} (${slotLabel(found)}).`);
+    return 0;
+  }
+  await ctx.manager.credentials.deleteStash(found.slot, found.email);
+  ctx.manager.credentials.deleteAccountIdentity(found.slot, found.email);
+  ctx.manager.cache.forget(found.slot);
+  ctx.manager.roster.update((r) => {
+    delete r.accounts[String(found.slot)];
+    if (r.activeSlot === found.slot) r.activeSlot = null;
+  });
+  ctx.out(`removed slot ${found.slot}`);
+  return 0;
+}
+
+export function setAlias(ctx: AccountsContext, identifier: string, alias: string): number {
+  const found = requireSlot(ctx, identifier);
+  if (found === null) return 1;
+  if (alias === '--unset') {
+    ctx.manager.roster.update((r) => {
+      const entry = r.accounts[String(found.slot)];
+      if (entry !== undefined) entry.alias = '';
+    });
+    ctx.out(`cleared the alias on slot ${found.slot}`);
+    return 0;
+  }
+  let normalised: string;
+  try {
+    normalised = normaliseAlias(alias);
+  } catch (err) {
+    ctx.out((err as Error).message);
+    return 1;
+  }
+  const clash = slots(ctx.manager.roster.read()).find(
+    (s) => s.alias === normalised && s.slot !== found.slot,
+  );
+  if (clash !== undefined) {
+    ctx.out(`"${normalised}" is already slot ${clash.slot}'s alias`);
+    return 1;
+  }
+  ctx.manager.roster.update((r) => {
+    const entry = r.accounts[String(found.slot)];
+    if (entry !== undefined) entry.alias = normalised;
+  });
+  ctx.out(`slot ${found.slot} is now "${normalised}"`);
+  return 0;
+}
+
+export function setDisabled(
+  ctx: AccountsContext,
+  identifier: string,
+  disabled: boolean,
+): number {
+  const found = requireSlot(ctx, identifier);
+  if (found === null) return 1;
+  ctx.manager.roster.update((r) => {
+    const entry = r.accounts[String(found.slot)];
+    if (entry !== undefined) entry.disabled = disabled;
+  });
+  ctx.out(
+    disabled
+      ? `slot ${found.slot} is held out of automatic rotation (you can still switch to it by name)`
+      : `slot ${found.slot} is back in automatic rotation`,
+  );
+  return 0;
+}
+
+/** `accounts swap <a> <b>` — exchange two slots' numbers, credentials and all. */
+export async function swapAccounts(
+  ctx: AccountsContext,
+  aRef: string,
+  bRef: string,
+): Promise<number> {
+  const a = requireSlot(ctx, aRef);
+  const b = requireSlot(ctx, bRef);
+  if (a === null || b === null) return 1;
+  if (a.slot === b.slot) {
+    ctx.out('those are the same slot');
+    return 1;
+  }
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would swap slots ${a.slot} and ${b.slot}.`);
+    return 0;
+  }
+
+  // Move the credentials first. The stash is keyed by (slot, email), so a
+  // roster swap without moving the bytes would leave each slot pointing at the
+  // other's credential — a switch would then activate the wrong account while
+  // reporting the right one.
+  const stashA = await ctx.manager.credentials.readStash(a.slot, a.email);
+  const stashB = await ctx.manager.credentials.readStash(b.slot, b.email);
+  if (stashA.kind === 'unreadable' || stashB.kind === 'unreadable') {
+    ctx.out('refusing to swap: one of those slots\' credentials could not be read.');
+    return 1;
+  }
+  const identityA = ctx.manager.credentials.readAccountIdentity(a.slot, a.email);
+  const identityB = ctx.manager.credentials.readAccountIdentity(b.slot, b.email);
+
+  if (stashA.kind === 'found') await ctx.manager.credentials.writeStash(b.slot, a.email, stashA.value);
+  if (stashB.kind === 'found') await ctx.manager.credentials.writeStash(a.slot, b.email, stashB.value);
+  if (identityA !== null) ctx.manager.credentials.writeAccountIdentity(b.slot, a.email, identityA);
+  if (identityB !== null) ctx.manager.credentials.writeAccountIdentity(a.slot, b.email, identityB);
+  await ctx.manager.credentials.deleteStash(a.slot, a.email);
+  await ctx.manager.credentials.deleteStash(b.slot, b.email);
+  ctx.manager.credentials.deleteAccountIdentity(a.slot, a.email);
+  ctx.manager.credentials.deleteAccountIdentity(b.slot, b.email);
+
+  ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot));
+  ctx.manager.cache.forget(a.slot);
+  ctx.manager.cache.forget(b.slot);
+  ctx.out(`swapped slots ${a.slot} and ${b.slot}`);
+  return 0;
+}
+
+/** `accounts move <ref> <slot>` — put an account in a specific slot. */
+export async function moveAccount(
+  ctx: AccountsContext,
+  identifier: string,
+  target: number,
+): Promise<number> {
+  const found = requireSlot(ctx, identifier);
+  if (found === null) return 1;
+  if (found.slot === target) {
+    ctx.out(`slot ${target} is already where that account is`);
+    return 0;
+  }
+  const roster = ctx.manager.roster.read();
+  const occupant = roster.accounts[String(target)];
+  if (occupant !== undefined) return swapAccounts(ctx, String(found.slot), String(target));
+
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would move slot ${found.slot} to slot ${target}.`);
+    return 0;
+  }
+  const stash = await ctx.manager.credentials.readStash(found.slot, found.email);
+  if (stash.kind === 'unreadable') {
+    ctx.out('refusing to move: that slot\'s credential could not be read.');
+    return 1;
+  }
+  if (stash.kind === 'found') {
+    await ctx.manager.credentials.writeStash(target, found.email, stash.value);
+  }
+  const identity = ctx.manager.credentials.readAccountIdentity(found.slot, found.email);
+  if (identity !== null) ctx.manager.credentials.writeAccountIdentity(target, found.email, identity);
+  await ctx.manager.credentials.deleteStash(found.slot, found.email);
+  ctx.manager.credentials.deleteAccountIdentity(found.slot, found.email);
+
+  ctx.manager.roster.update((r) => {
+    const entry = r.accounts[String(found.slot)];
+    if (entry === undefined) return;
+    r.accounts[String(target)] = entry;
+    delete r.accounts[String(found.slot)];
+    if (r.activeSlot === found.slot) r.activeSlot = target;
+  });
+  ctx.manager.cache.forget(found.slot);
+  ctx.out(`moved slot ${found.slot} to slot ${target}`);
+  return 0;
+}
+
+/** `rotorcc accounts import --from-cswap`. */
+export async function importAccounts(
+  ctx: AccountsContext,
+  options: { from?: string; overwrite?: boolean },
+): Promise<number> {
+  const report = await importFromCswap({
+    roster: ctx.manager.roster,
+    credentials: ctx.manager.credentials,
+    ...(options.from !== undefined ? { from: options.from } : {}),
+    dryRun: ctx.dryRun,
+    ...(options.overwrite !== undefined ? { overwrite: options.overwrite } : {}),
+  });
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify(report, null, 2));
+    return report.imported.length > 0 || report.alreadyPresent.length > 0 ? 0 : 1;
+  }
+
+  if (report.storePath === null) {
+    for (const skip of report.skipped) ctx.out(skip.reason);
+    return 1;
+  }
+  ctx.out(`${ctx.dryRun ? 'DRY RUN — reading' : 'imported from'} ${report.storePath}`);
+  for (const entry of report.imported) {
+    ctx.out(`  slot ${entry.slot}  ${entry.email}  ${entry.note}`);
+  }
+  for (const slot of report.alreadyPresent) {
+    ctx.out(`  slot ${slot}  already in rotorcc's roster, left alone (--overwrite to replace)`);
+  }
+  for (const skip of report.skipped) {
+    ctx.out(`  ${skip.slot === null ? '' : `slot ${skip.slot}  `}skipped: ${skip.reason}`);
+  }
+  if (report.imported.length === 0 && report.alreadyPresent.length === 0) {
+    ctx.out('nothing was imported.');
+    return 1;
+  }
+  ctx.out('');
+  ctx.out('rotorcc now has its own copies. The source store was not modified and is not read again.');
+  return 0;
+}
+
+/**
+ * `rotorcc accounts export <path>` — write a portable copy.
+ *
+ * This DOES move credential bytes, and says so twice, because an export file
+ * left in a repository is the shape of every credential leak there has ever
+ * been. It is written 0600 and the message names the file.
+ */
+export async function exportAccounts(ctx: AccountsContext, path: string): Promise<number> {
+  if (!ctx.yes) {
+    ctx.out(`This writes REAL CREDENTIALS for every managed account into ${path}.`);
+    ctx.out('Anyone who reads that file can act as those accounts. It is not encrypted.');
+    ctx.out('Re-run with --yes if that is what you want.');
+    return 1;
+  }
+  const roster = ctx.manager.roster.read();
+  const bundle: {
+    version: 1;
+    exportedAt: string;
+    accounts: Array<Record<string, unknown>>;
+  } = { version: 1, exportedAt: new Date().toISOString(), accounts: [] };
+
+  for (const slot of slots(roster)) {
+    const stash = await ctx.manager.credentials.readStash(slot.slot, slot.email);
+    if (stash.kind !== 'found') {
+      ctx.out(`  slot ${slot.slot}: no readable credential, exported as metadata only`);
+    }
+    bundle.accounts.push({
+      slot: slot.slot,
+      email: slot.email,
+      uuid: slot.uuid,
+      organizationUuid: slot.organizationUuid,
+      organizationName: slot.organizationName,
+      alias: slot.alias,
+      disabled: slot.disabled,
+      kind: slot.kind,
+      credential: stash.kind === 'found' ? String(stash.value) : null,
+      identity: ctx.manager.credentials.readAccountIdentity(slot.slot, slot.email),
+    });
+  }
+
+  if (ctx.dryRun) {
+    ctx.out(`DRY RUN — would write ${bundle.accounts.length} account(s) to ${path}.`);
+    return 0;
+  }
+  writeJsonAtomic(path, bundle, { mode: 0o600 });
+  ctx.out(`wrote ${bundle.accounts.length} account(s) to ${path} (mode 0600)`);
+  ctx.out('That file contains live credentials. Move it somewhere safe and delete it when done.');
+  return 0;
+}
+
+export async function importBundle(ctx: AccountsContext, path: string): Promise<number> {
+  if (!existsSync(path)) {
+    ctx.out(`${path} does not exist`);
+    return 1;
+  }
+  let bundle: { accounts?: Array<Record<string, unknown>> };
+  try {
+    bundle = JSON.parse(readFileSync(path, 'utf8')) as { accounts?: Array<Record<string, unknown>> };
+  } catch (err) {
+    ctx.out(`${path} is not valid JSON: ${(err as Error).message.slice(0, 120)}`);
+    return 1;
+  }
+  const entries = bundle.accounts ?? [];
+  let count = 0;
+  for (const entry of entries) {
+    const slot = Number(entry.slot);
+    const email = typeof entry.email === 'string' ? entry.email : '';
+    if (!Number.isInteger(slot) || email === '') continue;
+    const existing = ctx.manager.roster.read().accounts[String(slot)];
+    if (existing !== undefined && !ctx.yes) {
+      ctx.out(`  slot ${slot} already exists; --yes to overwrite. Skipped.`);
+      continue;
+    }
+    if (ctx.dryRun) {
+      ctx.out(`  DRY RUN — would import slot ${slot} (${email})`);
+      count += 1;
+      continue;
+    }
+    if (typeof entry.credential === 'string' && entry.credential !== '') {
+      await ctx.manager.credentials.writeStash(slot, email, asSecret(entry.credential));
+    }
+    if (entry.identity !== undefined && entry.identity !== null) {
+      ctx.manager.credentials.writeAccountIdentity(slot, email, entry.identity);
+    }
+    ctx.manager.roster.update((r) => {
+      r.accounts[String(slot)] = {
+        email,
+        uuid: typeof entry.uuid === 'string' ? entry.uuid : '',
+        organizationUuid: typeof entry.organizationUuid === 'string' ? entry.organizationUuid : '',
+        organizationName: typeof entry.organizationName === 'string' ? entry.organizationName : '',
+        added: new Date().toISOString(),
+        alias: typeof entry.alias === 'string' ? entry.alias : '',
+        disabled: entry.disabled === true,
+        kind: entry.kind === 'api-key' ? 'api-key' : 'oauth',
+      };
+    });
+    count += 1;
+  }
+  ctx.out(`${ctx.dryRun ? 'would import' : 'imported'} ${count} account(s) from ${path}`);
+  return count > 0 ? 0 : 1;
+}
+
+/** `rotorcc switch [ref] [--strategy ...]`. */
+export async function switchCommand(
+  ctx: AccountsContext,
+  options: { identifier?: string; strategy?: Strategy; force?: boolean },
+): Promise<number> {
+  const roster = ctx.manager.roster.read();
+  let target: RosterSlot | null = null;
+  let reason = '';
+
+  if (options.identifier !== undefined && options.identifier !== '') {
+    target = requireSlot(ctx, options.identifier);
+    if (target === null) return 1;
+    reason = 'named explicitly';
+  } else {
+    const reading = await ctx.manager.readUsage({ force: options.force ?? false });
+    const selection = selectTarget(reading, {
+      strategy: options.strategy ?? 'best',
+      activeNumber: reading.activeAccountNumber,
+      minHeadroomPct: ctx.config.minTargetHeadroomPct,
+    });
+    if (selection.chosen === null) {
+      if (ctx.json) ctx.out(JSON.stringify({ ok: false, reason: selection.reason }, null, 2));
+      else ctx.out(selection.reason);
+      return 3;
+    }
+    const found = slots(roster).find((s) => s.slot === selection.chosen?.number);
+    if (found === undefined) {
+      ctx.out('the chosen account is no longer in the roster');
+      return 1;
+    }
+    target = found;
+    reason = selection.reason;
+  }
+
+  const result = await switchAccount({
+    roster: ctx.manager.roster,
+    credentials: ctx.manager.credentials,
+    target,
+    dryRun: ctx.dryRun,
+  });
+
+  if (ctx.json) {
+    ctx.out(JSON.stringify({ ...result, selection: reason }, null, 2));
+    return result.ok ? 0 : 1;
+  }
+  ctx.out(result.detail);
+  if (reason !== '') ctx.out(`  (${reason})`);
+  for (const warning of result.warnings) ctx.out(`  warning: ${warning}`);
+  return result.ok ? 0 : 1;
+}
+
+/** `rotorcc map|unmap` — bind a directory to an account. */
+export function mapCommand(
+  ctx: AccountsContext,
+  options: { identifier?: string; path?: string },
+): number {
+  const store = new MappingStore(ctx.manager.accountsDir);
+  if (options.identifier === undefined) {
+    const list = store.list();
+    if (ctx.json) {
+      ctx.out(JSON.stringify(list, null, 2));
+      return 0;
+    }
+    if (list.length === 0) {
+      ctx.out('no directory is mapped to an account');
+      return 0;
+    }
+    for (const entry of list) ctx.out(`  ${String(entry.slot).padEnd(4)} ${entry.path}`);
+    return 0;
+  }
+  const found = requireSlot(ctx, options.identifier);
+  if (found === null) return 1;
+  const path = store.set(options.path ?? process.cwd(), found.slot);
+  ctx.out(`${path} → slot ${found.slot} (${slotLabel(found)})`);
+  return 0;
+}
+
+export function unmapCommand(ctx: AccountsContext, path?: string): number {
+  const store = new MappingStore(ctx.manager.accountsDir);
+  const target = path ?? process.cwd();
+  ctx.out(store.unset(target) ? `unmapped ${target}` : `${target} was not mapped`);
+  return 0;
+}
+
+function requireSlot(ctx: AccountsContext, identifier: string): RosterSlot | null {
+  const result = resolveIdentifier(ctx.manager.roster.read(), identifier);
+  if (result.kind === 'found') return result.slot;
+  if (result.kind === 'ambiguous') {
+    ctx.out(
+      `"${identifier}" matches more than one account: ` +
+        result.matches.map((m) => `slot ${m.slot}`).join(', '),
+    );
+    ctx.out('Use the slot number.');
+    return null;
+  }
+  ctx.out(`no account matches "${identifier}"`);
+  return null;
+}
+
+function readAllStdin(): string {
+  try {
+    return readFileSync(0, 'utf8');
+  } catch {
+    return '';
+  }
+}
