@@ -285,10 +285,21 @@ function accountLines(account: AccountReading, model: DashboardModel, c: Palette
       : account.headroomPct <= model.thresholds.warnPct
         ? c.warn
         : c.good;
+  const used = usedPctOf(account);
+  if (used === null) {
+    // Unreachable while the guard above stands, and written as a refusal rather
+    // than a numeric fallback anyway. Under the used convention `?? 0` is
+    // actively dangerous: it renders an account rotorcc could not measure as
+    // "0% used", which reads as completely fresh and makes it the most
+    // attractive rotation target on the screen. The same fallback under the old
+    // convention read as "spent" and failed safe. An inversion turns a harmless
+    // default into a harmful one, quietly, which is why there is no default.
+    const reason = account.unknownReason ?? 'not measured';
+    return [`  ${marker} ${number}${name} ${c.unknown(padVisible(UNKNOWN, 24))} ${c.dim(reason)}`];
+  }
   // Used, not remaining, and the window is printed beside it below. The bar
   // fills as the window is spent, which is the direction every other quota
   // display an operator looks at moves in.
-  const used = usedPctOf(account) ?? 0;
   const meter = `${bar(used)} ${level(`${used.toFixed(0).padStart(3)}% used`)}`;
   const resets =
     account.bindingResetsAt === undefined

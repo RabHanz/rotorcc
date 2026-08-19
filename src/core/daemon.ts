@@ -112,7 +112,15 @@ export type TickExitCode = 0 | 1 | 2 | 3;
  * because the tick itself completed — so without them a failed account switch
  * would exit 1 ("acted") and read to a cron job as a healthy rotation.
  */
-const FAILED_ACTION_MARKERS = new Set(['switch-failed', 'successor:failed']);
+const FAILED_ACTION_MARKERS = new Set([
+  'switch-failed',
+  'successor:failed',
+  // A hot swap that failed with no fallback left to try. Distinct from the
+  // plain `hotswap-failed` that precedes `fallback:successor`, because that one
+  // is followed by an attempt which may well succeed — and reporting an error
+  // for a rotation that then worked is its own kind of lie.
+  'hotswap-abandoned',
+]);
 
 export function exitCodeFor(result: TickResult): TickExitCode {
   if (!result.ok) return EXIT_ERROR;
@@ -418,7 +426,7 @@ async function rotate(
       logger.error('hot swap failed and rotation.mode is "hotswap"; not launching a successor', {
         detail: swap.detail,
       });
-      taken.push('hotswap-failed');
+      taken.push('hotswap-abandoned');
       return taken;
     }
 

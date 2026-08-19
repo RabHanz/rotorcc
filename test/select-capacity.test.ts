@@ -84,6 +84,43 @@ describe('capacityOf', () => {
     expect(capacityOf(late, { nowMs: NOW, horizonMs: 11 * 3_600_000 }).ready).toBe(true);
   });
 
+  it('reads the 5-hour reset from the 5-hour window, not from whichever binds', () => {
+    // Binding and 5-hour are usually the same window, because a spent 5-hour
+    // window is usually the smallest number. They come apart when the binding
+    // window is chosen under a per-model filter (`config.models`), which can
+    // leave the week or a model cap binding while the rate limit is spent.
+    //
+    // Reading the reset off `bindingResetsAt` there would put the week's reset
+    // — days away — into a readiness question about a rate limit that clears in
+    // twenty minutes, and rank a perfectly usable account below everything.
+    const weekBinds: AccountReading = {
+      ...account(8, [
+        { name: '5h', headroomPct: 0, resetsInMinutes: 20 },
+        { name: '7d', headroomPct: 4, resetsInMinutes: 5 * 24 * 60 },
+      ]),
+      bindingWindow: '7d',
+      bindingResetsAt: new Date(NOW + 5 * 24 * 60 * 60_000).toISOString(),
+      headroomPct: 4,
+    };
+
+    const capacity = capacityOf(weekBinds, { nowMs: NOW });
+    expect(capacity.bindingResetsInMs).toBeGreaterThan(24 * 3_600_000);
+    expect(capacity.ready).toBe(true);
+    expect(capacity.note).toContain('resets in 20m');
+  });
+
+  it('reports used, with the window, like every other surface', () => {
+    const note = capacityOf(
+      account(9, [
+        { name: '5h', headroomPct: 40 },
+        { name: '7d', headroomPct: 30 },
+      ]),
+      { nowMs: NOW },
+    ).note;
+    expect(note).toContain('70% used on 7d now');
+    expect(note).not.toContain('30% on');
+  });
+
   it('treats an unknown reset time as unready, never as "back soon"', () => {
     const noReset = account(4, [
       { name: '5h', headroomPct: 0 },
@@ -147,7 +184,10 @@ describe('selectTarget ranking', () => {
     );
 
     expect(selection.chosen?.number).toBe(3);
-    expect(selection.ranked[0]?.note).toContain('28%');
+    // The note reports USED, like every other surface: 28% headroom on the
+    // weekly budget is 72% of it spent.
+    expect(selection.ranked[0]?.note).toContain('72% of its 7d budget used');
+    expect(selection.ranked[0]?.note).not.toMatch(/\d+% on \w+ now$/);
     expect(selection.reason).toContain('weekly budget');
   });
 

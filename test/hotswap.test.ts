@@ -210,6 +210,43 @@ describe('hotSwapAccount', () => {
     expect(result.detail).toContain('NOT running on slot 2');
   });
 
+  it('ignores an old authentication failure in a transcript far larger than any tail window', async () => {
+    const w = await world();
+    // The real shape: a long session. An hour-old failure, then megabytes of
+    // ordinary work on top of it.
+    //
+    // A watch that compares TAILS rather than offsets breaks exactly here: the
+    // window slides as the session appends, the new tail no longer starts with
+    // the old one, the whole window reads as "fresh", and this old line is
+    // re-found. In `auto` that replaces a live, working session.
+    writeFileSync(w.transcript, '{"text":"Login expired · Please run /login"}\n', { flag: 'a' });
+    writeFileSync(w.transcript, `{"filler":"${'x'.repeat(200_000)}"}\n`, { flag: 'a' });
+    const time = fakeTime();
+    let ticks = 0;
+    const sleep = (ms: number): Promise<void> => {
+      ticks += 1;
+      // The session keeps working across the swap, sliding the window.
+      writeFileSync(w.transcript, `{"filler":"${'y'.repeat(100_000)}","n":${ticks}}\n`, {
+        flag: 'a',
+      });
+      return time.sleep(ms);
+    };
+
+    const result = await hotSwapAccount({
+      config: w.config,
+      logger: quietLogger,
+      targetSlot: 2,
+      transcriptPath: w.transcript,
+      dryRun: false,
+      manager: w.manager,
+      sleep,
+      now: time.now,
+    });
+
+    expect(result.verdict).toBe('verified');
+    expect(result.authFailure).toBeNull();
+  });
+
   it('ignores an authentication failure that was already in the transcript', async () => {
     const w = await world();
     // An hour-old failure the operator has already dealt with.

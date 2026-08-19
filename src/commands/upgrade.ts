@@ -112,7 +112,14 @@ export interface UpgradeReport {
 export interface UpgradeOptions {
   /** The resolved path of the running CLI. */
   binaryPath: string;
-  /** Override the located checkout. Tests use it; humans should not need to. */
+  /**
+   * Override the located checkout. **Tests only.**
+   *
+   * It bypasses the `.git` and package-name checks in `detectInstall`, which
+   * exist to stop this command fast-forwarding a branch and renaming `dist/`
+   * inside an unrelated project. There is deliberately no CLI flag for it: a
+   * mistyped path is not something to discover after the rename.
+   */
   repoRoot?: string;
   /** Report what is available and change nothing. */
   check: boolean;
@@ -397,6 +404,18 @@ export function publishStagedBuild(
   const staging = join(root, STAGING_DIR);
   const retired = join(root, RETIRED_DIR);
 
+  // A leftover retired directory with NO dist beside it is the fingerprint of a
+  // previous run killed between the two renames: that directory is then the
+  // only build on the machine. Deleting it — which is what unconditional
+  // cleanup did — destroys the last working copy before this run has proved it
+  // can produce another. Put it back first and let the swap proceed normally.
+  if (fs.exists(retired) && !fs.exists(dist)) {
+    try {
+      fs.rename(retired, dist);
+    } catch {
+      /* it stays where it is; the message below will name it */
+    }
+  }
   try {
     fs.rm(retired, { recursive: true, force: true });
   } catch {
@@ -424,10 +443,12 @@ export function publishStagedBuild(
     return {
       ok: false,
       error: (err as Error).message.slice(0, 200),
-      // Nothing was moved at all, so the installation is untouched — which
-      // counts as restored for the purpose of telling an operator whether the
-      // machine they are on still has a working rotorcc.
-      restored: moved ? restored : true,
+      // The question this answers is "does this machine still have a working
+      // dist?", not "did we undo something". When nothing was moved, the answer
+      // is yes only if there was a dist to leave alone — a first-ever build
+      // that fails to publish leaves the machine with none, and saying "the
+      // previous dist was restored" there would be a comforting lie.
+      restored: moved ? restored : fs.exists(dist),
     };
   }
   const windowMs = Date.now() - started;
@@ -1107,6 +1128,11 @@ export function renderUpgrade(report: UpgradeReport): string {
   lines.push(report.applied ? `  ${from}  →  ${to}` : `  ${from} — unchanged`);
   for (const note of report.notes) lines.push(`  note: ${note}`);
   lines.push('');
+  // "Nothing was applied" is a claim about the machine, and it is false once
+  // the new build is in place. A doctor check failing AFTER a successful swap
+  // means the upgrade happened and something else needs attention — telling an
+  // operator they are still on the old build in that state sends them to
+  // investigate the wrong thing entirely.
   lines.push(
     report.action === 'check'
       ? report.updateAvailable
@@ -1118,7 +1144,10 @@ export function renderUpgrade(report: UpgradeReport): string {
         ? report.applied
           ? '  Upgraded.'
           : '  Already current; nothing was changed.'
-        : '  NOT upgraded. Nothing was applied — see above.',
+        : report.applied
+          ? '  UPGRADED, but the checks afterwards did not pass. This machine IS on the new ' +
+            'build — see above for what is wrong with it.'
+          : '  NOT upgraded. Nothing was applied — see above.',
   );
   lines.push('');
   return lines.join('\n');

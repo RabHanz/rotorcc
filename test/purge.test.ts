@@ -217,6 +217,53 @@ describe('runPurge', () => {
     expect(output).toContain('uninstall-scheduler');
   });
 
+  it("refuses a target that overlaps Claude Code's own state, and does not delete it", () => {
+    // An operator puts the transcript store inside ~/.claude — an ordinary
+    // place to keep it. The old code printed "NOT touched: ~/.claude" and then
+    // rm -rf'd it one screen later, destroying the credential and every
+    // transcript. The promise has to be enforced, not captioned.
+    const w = world();
+    const inside = join(w.config.claudeHome, 'transcript-store');
+    mkdirSync(inside, { recursive: true });
+    writeFileSync(join(inside, 'a.jsonl'), 'x');
+    const config = { ...w.config, storePath: inside };
+
+    const targets = purgeTargets(config, w.manager, w.store, w.configPath, w.env);
+    const target = targets.find((t) => t.path === inside);
+    expect(target?.refused).toContain('does not touch');
+
+    const lines: string[] = [];
+    const code = runPurge({
+      ...w,
+      config,
+      yes: true,
+      dryRun: false,
+      json: false,
+      out: (line) => lines.push(line),
+    });
+
+    expect(existsSync(inside)).toBe(true);
+    expect(existsSync(join(w.config.claudeHome, '.credentials.json'))).toBe(true);
+    expect(lines.join('\n')).toContain('REFUSED');
+    expect(code).toBe(1);
+  });
+
+  it('emits exactly one JSON document, even with --yes', () => {
+    // Two concatenated documents means a consumer either throws on the
+    // trailing data or parses only the first and records deleted:false for a
+    // run that deleted every credential rotorcc had.
+    const w = world();
+    const lines: string[] = [];
+    runPurge({ ...w, yes: true, dryRun: false, json: true, out: (line) => lines.push(line) });
+
+    const text = lines.join('\n');
+    const parsed = JSON.parse(text) as { deleted: boolean; removed: string[] };
+    expect(parsed.deleted).toBe(true);
+    expect(parsed.removed.length).toBeGreaterThan(0);
+    expect(text.trim().endsWith('}')).toBe(true);
+    expect(text.match(/^\{/gm)?.length).toBe(1);
+  });
+
   it('--json without --yes reports the plan and exits non-zero', () => {
     const w = world();
     const lines: string[] = [];

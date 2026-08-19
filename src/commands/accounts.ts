@@ -826,12 +826,15 @@ export function unclaimedAccounts(ctx: AccountsContext, options: { purge?: strin
         (entry.emailIsExact ? '' : ' (from the filename, so possibly approximate)'),
     );
     ctx.out(`      ${entry.detail}`);
-    ctx.out(
-      `      ${entry.kind}   ${entry.fingerprint ?? 'no fingerprint'}` +
-        (entry.accessTokenExpiresAt === null
-          ? ''
-          : `   access token expired ${entry.accessTokenExpiresAt.slice(0, 16).replace('T', ' ')}`),
-    );
+    // "expired" vs "expires" is the difference between an operator purging a
+    // dead credential and purging a working login that only needed moving back.
+    // An orphan minutes old has an expiry in the FUTURE.
+    const expiry =
+      entry.accessTokenExpiresAt === null
+        ? ''
+        : `   access token ${Date.parse(entry.accessTokenExpiresAt) <= Date.now() ? 'expired' : 'expires'} ` +
+          entry.accessTokenExpiresAt.slice(0, 16).replace('T', ' ');
+    ctx.out(`      ${entry.kind}   ${entry.fingerprint ?? 'no fingerprint'}${expiry}`);
     ctx.out(
       `      last written ${entry.modifiedAt?.slice(0, 16).replace('T', ' ') ?? 'unknown'}` +
         (entry.ageMs === null ? '' : ` (${formatAge(entry.ageMs)} ago)`) +

@@ -707,7 +707,10 @@ async function main(): Promise<number> {
         config: ctx.config,
         store: ctx.store,
         ...(ctx.configPath === undefined ? {} : { configPath: ctx.configPath }),
-        ...(typeof flags.repo === 'string' ? { repoRoot: flags.repo } : {}),
+        // `repoRoot` is deliberately NOT exposed as a flag. It skips the .git
+        // and package-name checks that stop this command fast-forwarding and
+        // renaming dist/ inside somebody's unrelated project, and a mistyped
+        // path is not a thing to find out about afterwards.
         out,
       });
       return result.code;

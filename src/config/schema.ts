@@ -275,8 +275,14 @@ export const configSchema = z.object({
        * How long to watch the live session for an authentication failure after
        * a hot swap before calling it good. Zero disables the watch, which also
        * disables `auto`'s ability to detect a failed swap.
+       *
+       * Capped at two minutes on purpose. The watch runs inside the tick, which
+       * holds rotorcc's lock — so a generous-looking 600 here would make every
+       * hook-driven checkpoint and every later tick decline for ten minutes,
+       * and `rotorcc upgrade` refuse. The cap is below the default one-minute
+       * tick cadence's own tolerance rather than at some round number.
        */
-      hotswapVerifySeconds: z.number().int().nonnegative().default(20),
+      hotswapVerifySeconds: z.number().int().nonnegative().max(120).default(20),
     })
     .default({}),
 

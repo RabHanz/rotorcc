@@ -74,6 +74,12 @@ function systemdPlan(input: SchedulerInput, home: string): SchedulerPlan {
     'Type=oneshot',
     ...(input.path !== undefined && input.path !== '' ? [`Environment=PATH=${input.path}`] : []),
     `ExecStart=${exec}`,
+    // `daemon --once` exits 1 when it ACTED and 2 when it wanted to and could
+    // not. Both are the watcher doing its job, and without this systemd marks
+    // the unit `failed` on exactly those ticks — so the operator sees a red
+    // unit every time rotorcc checkpoints, and any alert on unit failure fires
+    // continuously. Only 3, a genuine error, should register as a failure.
+    'SuccessExitStatus=1 2',
     // A tick that hangs must not stack up behind the next one.
     'TimeoutStartSec=300',
     // This runs on a machine somebody is working on. It gets the leftovers.

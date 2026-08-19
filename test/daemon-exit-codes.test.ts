@@ -83,6 +83,25 @@ describe('daemon --once exit codes', () => {
     expect(EXIT_ERROR).toBe(3);
   });
 
+  it('exits 3 when a hot swap failed with no fallback left, but 1 when one succeeded after it', () => {
+    // In `hotswap` mode there is nothing to fall back to, so the rotation did
+    // not happen and nothing else did either. Reporting "acted" would tell a
+    // cron job the watcher was doing its job while the session kept burning an
+    // exhausted account.
+    expect(exitCodeFor(result({ actionsTaken: ['manifest', 'hotswap-abandoned'] }))).toBe(
+      EXIT_ERROR,
+    );
+    // In `auto` mode the failure is followed by an attempt that may work, and
+    // calling a successful rotation an error is its own misreport.
+    expect(
+      exitCodeFor(
+        result({
+          actionsTaken: ['manifest', 'hotswap-failed', 'fallback:successor', 'switched:2'],
+        }),
+      ),
+    ).toBe(EXIT_ACTED);
+  });
+
   it('exits 3 when an action it started failed, even though the tick finished', () => {
     // `tick()` returns ok:true here — the tick ran. But the switch it attempted
     // did not happen, and a cron job that reads that as a healthy rotation has

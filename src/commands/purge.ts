@@ -20,7 +20,7 @@
  *      command instead of reaching in.
  */
 import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 
 import type { AccountManager } from '../accounts/manager.js';
 import { slots } from '../accounts/roster.js';
@@ -41,6 +41,29 @@ export interface PurgeTarget {
   bytes: number;
   /** Set when removing this loses something that cannot be recreated. */
   irreversible?: string;
+  /**
+   * Set when this target overlaps something purge promised not to touch, in
+   * which case it is REFUSED rather than deleted.
+   *
+   * The overlap is real, not theoretical: `storePath` is operator-configured,
+   * and `~/.claude/transcript-store` is an ordinary-looking place to put a
+   * transcript store. Printing "NOT touched: ~/.claude" one screen before
+   * `rm -rf`-ing it would be the worst thing this program could do.
+   */
+  refused?: string;
+}
+
+/**
+ * True when `path` is, contains, or is inside `other`.
+ *
+ * Both directions matter. Deleting a parent of a protected path destroys it;
+ * deleting a child of one destroys part of it.
+ */
+export function pathsOverlap(path: string, other: string): boolean {
+  const a = resolve(path);
+  const b = resolve(other);
+  if (a === b) return true;
+  return a.startsWith(`${b}${sep}`) || b.startsWith(`${a}${sep}`);
 }
 
 export interface PurgeContext {
@@ -151,7 +174,21 @@ export function purgeTargets(
       bytes: sizeOf(logFile),
     });
   }
-  return targets;
+
+  // The promise, enforced. Every target is checked against the protected list
+  // and marked refused if it overlaps one, so "NOT touched" is a property of
+  // the code and not a caption on the output.
+  const protectedList = protectedPaths(config, env);
+  return targets.map((target) => {
+    const clash = protectedList.find((entry) => pathsOverlap(target.path, entry.path));
+    if (clash === undefined) return target;
+    return {
+      ...target,
+      refused:
+        `overlaps ${clash.path} (${clash.what}), which purge does not touch. ` +
+        'Move it somewhere of its own and run purge again.',
+    };
+  });
 }
 
 /** Files purge must never touch, listed so the promise can be checked. */
@@ -196,7 +233,11 @@ export function runPurge(ctx: PurgeContext): number {
     },
   ];
 
-  if (ctx.json) {
+  // One JSON document per invocation, emitted once, at the end. Printing the
+  // plan and then the result gives a consumer two concatenated objects: either
+  // it throws on the trailing data, or a lenient reader parses the first and
+  // records `deleted: false` for a run that deleted every credential there was.
+  const emitJson = (extra: Record<string, unknown>): void => {
     ctx.out(
       JSON.stringify(
         {
@@ -204,14 +245,20 @@ export function runPurge(ctx: PurgeContext): number {
           totalBytes,
           notTouched: protectedList,
           leftInPlace: leftovers,
-          deleted: false,
           confirmed: ctx.yes,
+          ...extra,
         },
         null,
         2,
       ),
     );
-    if (!ctx.yes || ctx.dryRun) return 1;
+  };
+
+  if (ctx.json) {
+    if (!ctx.yes || ctx.dryRun) {
+      emitJson({ deleted: false, removed: [], failed: [] });
+      return 1;
+    }
   } else {
     ctx.out('rotorcc purge — this would delete:');
     ctx.out('');
@@ -220,7 +267,9 @@ export function runPurge(ctx: PurgeContext): number {
         `  ${target.exists ? humanBytes(target.bytes).padStart(9) : 'not there'}  ${target.path}`,
       );
       ctx.out(`  ${' '.repeat(9)}  ${target.what}`);
-      if (target.irreversible !== undefined && target.exists) {
+      if (target.refused !== undefined) {
+        ctx.out(`  ${' '.repeat(9)}  REFUSED: ${target.refused}`);
+      } else if (target.irreversible !== undefined && target.exists) {
         ctx.out(`  ${' '.repeat(9)}  IRREVERSIBLE: ${target.irreversible}`);
       }
     }
@@ -257,6 +306,10 @@ export function runPurge(ctx: PurgeContext): number {
   const failed: Array<{ path: string; error: string }> = [];
   for (const target of targets) {
     if (!target.exists) continue;
+    // The refusal is enforced here as well as printed above. A promise that
+    // only exists in the rendering is a promise one refactor away from being
+    // false, and this one guards an operator's Claude Code login.
+    if (target.refused !== undefined) continue;
     try {
       rmSync(target.path, { recursive: true, force: true });
       removed.push(target.path);
@@ -265,10 +318,13 @@ export function runPurge(ctx: PurgeContext): number {
     }
   }
 
+  const refused = targets.filter((t) => t.refused !== undefined);
+
   if (ctx.json) {
-    ctx.out(JSON.stringify({ deleted: true, removed, failed }, null, 2));
+    emitJson({ deleted: true, removed, failed });
   } else {
     for (const path of removed) ctx.out(`  removed  ${path}`);
+    for (const target of refused) ctx.out(`  REFUSED  ${target.path}: ${target.refused ?? ''}`);
     for (const failure of failed) ctx.out(`  FAILED   ${failure.path}: ${failure.error}`);
     ctx.out('');
     ctx.out(
@@ -276,6 +332,11 @@ export function runPurge(ctx: PurgeContext): number {
         ? `Purged. ${removed.length} path(s) removed; Claude Code's own state was not touched.`
         : `${removed.length} removed, ${failed.length} could NOT be removed — see above.`,
     );
+    if (refused.length > 0) {
+      ctx.out(
+        `${refused.length} path(s) were left alone because they overlap Claude Code's own state.`,
+      );
+    }
   }
-  return failed.length === 0 ? 0 : 1;
+  return failed.length === 0 && refused.length === 0 ? 0 : 1;
 }

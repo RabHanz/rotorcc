@@ -208,6 +208,17 @@ export async function inspectTree(
     detached = true;
   }
 
+  // HEAD FIRST, before anything else is measured.
+  //
+  // Everything below describes the tree as of some commit, and the staleness
+  // guard in `checkpointTree` compares against this value. Reading it last —
+  // after the dirty count, after the ahead/behind counts — records a HEAD the
+  // rest of the reading was not taken at, so a commit landing mid-inspection
+  // produces a reading that describes the old tree and a sha that matches the
+  // new one. The guard would then pass on exactly the case it exists for.
+  const headResult = await git(ctx, treePath, ['rev-parse', 'HEAD']);
+  const headSha = headResult.code === 0 ? headResult.stdout.trim() || null : null;
+
   const status = await git(ctx, treePath, ['status', '--porcelain']);
   const dirtyFiles = status.stdout.split(/\r?\n/).filter((l) => l.trim() !== '').length;
 
@@ -240,8 +251,6 @@ export async function inspectTree(
   const remotes = await git(ctx, treePath, ['remote']);
   const remote = pickRemote(remotes.stdout);
   const tip = (await git(ctx, treePath, ['log', '--oneline', '-1'])).stdout.trim();
-  const headResult = await git(ctx, treePath, ['rev-parse', 'HEAD']);
-  const headSha = headResult.code === 0 ? headResult.stdout.trim() || null : null;
 
   return {
     path: treePath,
@@ -435,11 +444,27 @@ export async function checkpointTree(
   // by then rotorcc has already made the commit, and the failure arrives as a
   // push error the operator has to decode rather than as a refusal that names
   // the problem. It also says nothing about a tree that is simply behind.
-  if (tree.upstream !== null) {
+  //
+  // When the branch has no configured upstream the remote-tracking ref is
+  // still the right thing to compare against, and it is often present: a
+  // branch pushed from another machine leaves `<remote>/<branch>` here after
+  // any fetch, with no `branch.<name>.merge` config. Skipping the check in that
+  // case left the one shape the invariant is about — a remote ahead of us —
+  // entirely to the server.
+  const compareAgainst =
+    tree.upstream ??
+    (await (async (): Promise<string | null> => {
+      if (tree.remote === null) return null;
+      const ref = `${tree.remote}/${tree.branch}`;
+      const exists = await git(ctx, tree.path, ['rev-parse', '--verify', '--quiet', ref]);
+      return exists.code === 0 && exists.stdout.trim() !== '' ? ref : null;
+    })());
+
+  if (compareAgainst !== null) {
     const ancestor = await git(ctx, tree.path, [
       'merge-base',
       '--is-ancestor',
-      tree.upstream,
+      compareAgainst,
       'HEAD',
     ]);
     if (ancestor.code !== 0) {
@@ -447,7 +472,7 @@ export async function checkpointTree(
         ...base,
         committed,
         skipped:
-          `not pushed: ${tree.upstream} is not an ancestor of this branch's tip` +
+          `not pushed: ${compareAgainst} is not an ancestor of this branch's tip` +
           (tree.behind === null || tree.behind === 0 ? '' : ` (${tree.behind} commit(s) behind)`) +
           '. Pushing would publish a history that drops work already on the remote. ' +
           'Anything dirty was committed locally and is safe; reconcile this by hand.',

@@ -1,0 +1,115 @@
+{
+  "status": "reviewed",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/core/hotswap.ts",
+      "line": 266,
+      "summary": "The post-swap auth-failure watch only treats bytes as \"fresh\" when the new tail still starts with the old tail, so once a transcript exceeds the 64 KB tail window it rescans pre-swap content and reports a healthy swap as failed.",
+      "failure_scenario": "A real session's transcript is well over TAIL_BYTES (64 KB). `before` is the last 64 KB at swap time; two seconds later the session appends a turn, so `after` is a different 64 KB window and `after.startsWith(before)` is false. `fresh` therefore becomes the entire 64 KB tail, which contains everything the session said before the swap. If any of the six AUTH_FAILURE_SIGNATURES appears anywhere in that window \u2014 an hour-old `Login expired`, an `authentication_error` string the agent happened to print or read from a file \u2014 hotSwapAccount returns `failed` even though the credential swap worked. In `auto` mode rotorcc then falls back to the successor path and replaces a live, working session (cold start, lost context); in `hotswap` mode the rotation is abandoned entirely. test/hotswap.test.ts's \"ignores an authentication failure that was already in the transcript\" cannot catch this because its fixture transcript is a few hundred bytes, so the prefix branch always holds."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/daemon.ts",
+      "line": 113,
+      "summary": "`FAILED_ACTION_MARKERS` does not include `hotswap-failed`, so a tick that attempted a hot swap, failed, and did nothing else exits 1 (\"acted\") instead of 3.",
+      "failure_scenario": "With `rotation.mode = \"hotswap\"`, rotate() pushes `hotswap-failed` and returns without switching anything (src/core/daemon.ts ~line 416). `exitCodeFor` sees no marker from the set, no `blocked` prefix, and a non-empty `actionsTaken`, so `daemon --once` exits 1. A cron line branching on the documented contract reads 1 as \"acted \u2014 warned, checkpointed, queued a handover, or switched\" and stays silent, while the session keeps burning the exhausted account and no rotation happened at all \u2014 the exact misreport the marker set was introduced to prevent."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/upgrade.ts",
+      "line": 1113,
+      "summary": "In checkout mode the PATH check and doctor run after `dist/` has already been swapped, but a failure there sets `report.ok = false`, which makes the renderer print \"NOT upgraded. Nothing was applied\" and return exit 1 (\"refused or failed; nothing applied\").",
+      "failure_scenario": "An operator runs `rotorcc upgrade` on a checkout. The fast-forward, install, staged build and rename all succeed, so HEAD moved and `dist/` now contains the new build. `appendDoctor` then runs the new binary's `doctor --json`, which reports one failing check (no accounts configured, scheduler not installed, whatever). `report.ok` flips to false, the summary line prints \"NOT upgraded. Nothing was applied \u2014 see above.\" and the command exits 1, which the documented table defines as \"refused or failed; nothing applied\". The operator, and any script branching on that code, now believes the machine is still on the old build when it is not."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/purge.ts",
+      "line": 262,
+      "summary": "`runPurge --json --yes` writes two separate JSON documents to stdout \u2014 the plan with `\"deleted\": false`, then the result with `\"deleted\": true` \u2014 so the machine-readable output is not parseable JSON.",
+      "failure_scenario": "A script runs `rotorcc purge --json --yes` and pipes stdout to `JSON.parse` / `jq`. The first `if (ctx.json)` block emits the plan object and only returns early when `!ctx.yes || ctx.dryRun`; with `--yes` it falls through and the second `if (ctx.json)` emits `{deleted:true,removed,failed}` after it. The consumer either throws on trailing data or (with a lenient reader) parses only the first document and records `deleted: false` for a run that deleted every credential rotorcc had."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/purge.ts",
+      "line": 250,
+      "summary": "`protectedPaths` is printed as a checkable promise but is never enforced: nothing verifies that a delete target is not, or does not contain, one of the protected Claude Code paths.",
+      "failure_scenario": "An operator sets `storePath` (or `accountsDir`) to a directory that is, or contains, `claudeHome` \u2014 e.g. `storePath: ~/.claude`, which is an ordinary-looking place to keep a transcript store. `purgeTargets` returns that path, `protectedPaths` prints `~/.claude` under \"NOT touched\" in the same output, and the deletion loop then runs `rmSync(path, {recursive: true, force: true})` over it, destroying Claude Code's credential, config and transcripts one screen after promising not to. The list is presented as the mechanism that makes the promise checkable, but no code compares the two lists."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/upgrade.ts",
+      "line": 478,
+      "summary": "`publishStagedBuild` returns `restored: true` whenever `dist` was never moved, including the case where `dist` did not exist, so the caller prints \"The previous dist/ was restored and this machine still runs it\" when there is no `dist` at all and suppresses the recovery command.",
+      "failure_scenario": "A previous upgrade was killed between the two renames, leaving no `dist/` and the only working build in `.rotorcc-dist-previous`. The next run of `publishStagedBuild` first `rm`s `.rotorcc-dist-previous`, then finds no `dist` (so `moved` stays false) and fails on `rename(staging, dist)` \u2014 e.g. EXDEV, ENOSPC, or a permissions error. Because `moved` is false it reports `restored: true`, and upgradeCheckout prints \"The previous dist/ was restored and this machine still runs it\" instead of the `dist/ IS MISSING \u2014 restore it now: mv \u2026` branch. The operator has no rotorcc binary, no `dist`, no retired copy, and has just been told everything is fine."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/upgrade.ts",
+      "line": 640,
+      "summary": "`--repo` is wired through from the CLI and short-circuits every identity check in `detectInstall`, so the checkout path will fast-forward, reinstall and rename `dist/` in any directory the operator names.",
+      "failure_scenario": "`runUpgrade` takes `options.repoRoot` straight to `{kind: 'checkout', root: resolve(options.repoRoot)}`, skipping the `.git` existence check and the `package.json.name === 'rotorcc'` check that exist precisely to stop this. `src/cli.ts` passes `--repo` through unfiltered. A user who mistypes `rotorcc upgrade --repo ~/my-app` gets `git merge --ff-only` on that project's branch, `pnpm install --frozen-lockfile`, `tsc -p tsconfig.build.json --outDir .rotorcc-upgrade`, and then that project's `dist/` renamed away and deleted (`rm(retired)` at the end of `publishStagedBuild`). The flag is undocumented in HELP, so nothing warns them."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/accounts.ts",
+      "line": 830,
+      "summary": "The unclaimed listing prints `access token expired <timestamp>` whenever `accessTokenExpiresAt` is non-null, but that field is just the expiry, which for a recently stashed credential is in the future.",
+      "failure_scenario": "An operator runs `rotorcc accounts unclaimed` minutes after a crashed switch left a real, live login orphaned. Its access token expires in 50 minutes, so `accessTokenExpiresAt` is a future ISO timestamp and the line reads \"access token expired 2026-08-20 03:00\". Reading that the credential is dead, the operator runs `--purge <id> --yes` and destroys a working login that only needed to be moved back."
+    },
+    {
+      "severity": "P2",
+      "file": "src/accounts/select.ts",
+      "line": 165,
+      "summary": "`capacityOf`'s note \u2014 the human sentence attached to every ranked candidate \u2014 still reports headroom (\"28% on 7d now\"), while every other surface in this change reports used.",
+      "failure_scenario": "After this change `rotorcc status` shows account 3 as `72% used (7d)` and the selector's candidate list shows the same account as `28% on 7d now`. The operator comparing the two screens has to invert one of them in their head \u2014 exactly the mistake the used-not-remaining convention was introduced to remove, and the CHANGELOG's claim that \"every human surface now shows used\" is false for the selection output. test/select-capacity.test.ts pins the headroom form (`note` contains `28%`), so the inconsistency is locked in."
+    },
+    {
+      "severity": "P2",
+      "file": "src/cli.ts",
+      "line": 411,
+      "summary": "`daemon --once` now exits 1 on ordinary success (\"acted\"), and nothing in the diff adapts the every-minute scheduler unit that rotorcc installs to the new meaning of non-zero.",
+      "failure_scenario": "`install-scheduler` sets up a one-minute systemd timer/launchd agent running the tick. Previously a successful tick exited 0. Now every tick that warns, checkpoints, queues a handover or switches exits 1, so systemd marks the unit `failed` on each such run (and launchd logs it as a non-zero exit). The operator sees a watcher that reports failure precisely when it is doing its job, and any existing alert on unit failure fires continuously; the CHANGELOG notes the breaking change for cron consumers but nothing updates rotorcc's own installed unit."
+    },
+    {
+      "severity": "P3",
+      "file": "src/accounts/select.ts",
+      "line": 145,
+      "summary": "Readiness uses `bindingResetsAt` and only consults it when the 5-hour window is the binding one, so an account whose 5h window is spent but whose week binds is always ranked \"not ready\" even when its per-window `resetsAt` is minutes away.",
+      "failure_scenario": "Account A reports 5h at 0% resetting in 20 minutes and 7d at 4%, so the binding window is 7d and `bindingResetsAt` is days away. `fiveHourIsBinding` is false, so `resetsInsideHorizon` is false, `fiveHourHasRoom` is false, and `ready` is false \u2014 the account is ranked below every ready one and annotated \"NOT usable within the horizon\", despite being usable in twenty minutes. The per-window reset time is available in `account.windows` and is not consulted."
+    },
+    {
+      "severity": "P3",
+      "file": "src/core/worktrees.ts",
+      "line": 272,
+      "summary": "`inspectTree` reads `rev-parse HEAD` last, after the dirty-file count and the ahead/behind counts, so `headSha` is not the HEAD the rest of the reading was taken at and the staleness guard can be defeated inside `inspectTree` itself.",
+      "failure_scenario": "A commit lands in the worktree between `git status` and the trailing `git rev-parse HEAD` \u2014 a hook, another agent, or a `git pull` in the same second. `dirtyFiles` describes the pre-commit tree, but `headSha` records the post-commit HEAD, so `checkpointTree`'s re-read matches and the guard passes. The sweep then stages `-A` against a HEAD it never actually planned against \u2014 the same shape the guard exists to make unavailable, just with a narrower window. Reading HEAD first (or before and after) would close it."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/render.ts",
+      "line": 291,
+      "summary": "`usedPctOf(account) ?? 0` fabricates a measurement for an unmeasured account, and the inversion flips the fallback from fail-safe to fail-dangerous.",
+      "failure_scenario": "If an unmeasured account ever reaches `accountLines` (the sibling bug just fixed in `renderStatus` was exactly this guard missing), the old code printed `0%` headroom with an empty bar, which reads as \"spent\" and is conservative. The new code prints `0% used` with an empty bar, which reads as \"completely fresh\" \u2014 an operator would rotate onto the one account rotorcc could not measure. The fallback should be \"draw no bar and no number\", as `bar`'s own docstring says."
+    },
+    {
+      "severity": "P3",
+      "file": "src/config/schema.ts",
+      "line": 275,
+      "summary": "`hotswapVerifySeconds` has no upper bound, and the watch loop it drives runs inside the tick while the tick holds rotorcc's lock.",
+      "failure_scenario": "An operator sets `rotation.hotswapVerifySeconds` to 600 to make verification more reliable. On the next rotation the tick sits in `watchForAuthFailure` for ten minutes holding the `tick` lock, so every hook-driven checkpoint and every subsequent tick during that window declines with \"another rotorcc operation holds the lock\", and `rotorcc upgrade` refuses. Nothing in the schema or the watch bounds the value against the one-minute tick cadence."
+    },
+    {
+      "severity": "P3",
+      "file": "src/core/worktrees.ts",
+      "line": 437,
+      "summary": "The descendant invariant is only checked when `tree.upstream !== null`, so a branch that exists on the remote but has no local upstream configured is pushed with no ancestry check at all.",
+      "failure_scenario": "A branch was pushed from another machine and this worktree has no `branch.<name>.merge` config, so `rev-parse --abbrev-ref @{upstream}` fails and `upstream` is null. `checkpointTree` skips the `merge-base --is-ancestor` guard entirely and runs `git push -u <remote> <branch>` against a remote tip it never compared against. The server rejects the non-fast-forward, so nothing is lost \u2014 but the stated invariant (\"checked here \u2026 rather than relying on the server\") does not hold, and the operator gets `result.error` with a push error to decode instead of the named refusal."
+    }
+  ],
+  "blocking": true,
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "note": "Blind critic per docs/operations/BLIND-CRITIC-FALLBACK.md: a fresh headless process was given the diff and the review contract and nothing else \u2014 no commit messages, no PR body, no author reasoning, no prior verdict. This is a weaker independence guarantee than a different vendor's model and is recorded as such. Codex was NOT run.",
+  "disposition": "All 15 findings accepted; none refuted. The P1 (tail-window comparison in the hot-swap watch) and every P2 are fixed with regression tests. The five P3s are fixed too."
+}

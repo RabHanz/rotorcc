@@ -44,8 +44,9 @@ import { AccountManager } from '../accounts/manager.js';
 import { credentialFingerprint } from '../accounts/credentials.js';
 import { type RosterSlot, resolveIdentifier } from '../accounts/roster.js';
 import { switchAccount } from '../accounts/switch.js';
+import { open, stat } from 'node:fs/promises';
+
 import type { Logger } from './log.js';
-import { readTail } from './transcripts.js';
 
 /**
  * Signatures Claude Code prints when its credential is not accepted.
@@ -99,7 +100,6 @@ export interface HotSwapOptions {
 }
 
 const POLL_MS = 2_000;
-const TAIL_BYTES = 64 * 1024;
 
 export async function hotSwapAccount(options: HotSwapOptions): Promise<HotSwapResult> {
   const { config, logger, targetSlot } = options;
@@ -256,19 +256,64 @@ async function watchForAuthFailure(
   const clock = options.now ?? (() => Date.now());
   const deadline = clock() + seconds * 1000;
 
-  const before = await readTail(path, TAIL_BYTES);
+  // The byte offset at the moment of the swap, NOT a snapshot of the tail.
+  //
+  // Comparing tails and slicing off a matching prefix looks equivalent and is
+  // not: a transcript is normally far larger than any tail window, so once the
+  // session appends anything the window slides and the new tail does not start
+  // with the old one. The whole window then reads as "fresh", every
+  // authentication failure the session ever printed is re-found, and a working
+  // swap is reported as broken — which in `auto` mode replaces a live, healthy
+  // session. An offset cannot slide.
+  const start = await fileSize(path);
   let madeProgress = false;
 
   for (;;) {
     await sleep(POLL_MS);
-    const after = await readTail(path, TAIL_BYTES);
-    if (after !== before) madeProgress = true;
-    // Only the bytes that arrived AFTER the swap. Scanning the whole tail would
-    // re-find an authentication failure from an hour ago and report a working
-    // swap as broken.
-    const fresh = after.startsWith(before) ? after.slice(before.length) : after;
+    const size = await fileSize(path);
+    if (size > start) madeProgress = true;
+    // A transcript that SHRANK was rotated or truncated under us. There is no
+    // longer any way to tell which bytes are new, so scan nothing rather than
+    // scan everything and report a failure that may predate the swap.
+    const fresh = size >= start ? await readFrom(path, start) : '';
     const hit = AUTH_FAILURE_SIGNATURES.find((signature) => fresh.includes(signature));
     if (hit !== undefined) return { authFailure: hit, madeProgress: true };
     if (clock() >= deadline) return { authFailure: null, madeProgress };
+  }
+}
+
+async function fileSize(path: string): Promise<number> {
+  try {
+    return (await stat(path)).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Everything written to `path` from `offset` onward, capped.
+ *
+ * The cap is a guard, not a window: a session that produced megabytes during
+ * the watch is not a session whose bytes all need scanning, and reading an
+ * unbounded amount inside a watcher tick is its own defect.
+ */
+async function readFrom(path: string, offset: number, limit = 4 * 1024 * 1024): Promise<string> {
+  let handle;
+  try {
+    handle = await open(path, 'r');
+  } catch {
+    return '';
+  }
+  try {
+    const size = (await handle.stat()).size;
+    const length = Math.min(Math.max(0, size - offset), limit);
+    if (length === 0) return '';
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, offset);
+    return buffer.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    await handle.close();
   }
 }

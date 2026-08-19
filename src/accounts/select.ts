@@ -150,27 +150,41 @@ export function capacityOf(
   // Readiness is about the RATE limit, not the budget. A 5-hour window with
   // room is ready now; one that is spent is ready once it resets, and only if
   // we know when that is.
+  //
+  // The reset time comes from the 5-HOUR window's own entry, not from
+  // `bindingResetsAt`. Those are the same thing only when the 5-hour window
+  // happens to be the binding one; when the week binds instead,
+  // `bindingResetsAt` is days away, and using it would call an account "not
+  // usable within the horizon" when its rate limit clears in twenty minutes.
   const fiveHour = view.fiveHourPct;
   const fiveHourHasRoom = fiveHour === null ? false : fiveHour > 0;
-  const fiveHourIsBinding = account.bindingWindow === '5h';
-  const resetsInsideHorizon =
-    fiveHourIsBinding && bindingResetsInMs !== null && bindingResetsInMs <= horizonMs;
+  const fiveHourWindow = account.windows.find((w) => w.name === '5h');
+  const fiveHourResetParsed =
+    fiveHourWindow?.resetsAt === undefined ? Number.NaN : Date.parse(fiveHourWindow.resetsAt);
+  const fiveHourResetsInMs = Number.isNaN(fiveHourResetParsed)
+    ? null
+    : Math.max(0, fiveHourResetParsed - nowMs);
+  const resetsInsideHorizon = fiveHourResetsInMs !== null && fiveHourResetsInMs <= horizonMs;
   // No 5-hour reading at all: nothing says this account is rate-limited, so it
   // is not held back on that account. The binding window still gates the rank.
   const ready = fiveHour === null ? true : fiveHourHasRoom || resetsInsideHorizon;
 
   const rankPct = weekly.pct ?? account.headroomPct;
 
+  // Used, not remaining, and with the window named — the same convention every
+  // other surface reports in. A candidate list that says "28% on 7d" beside a
+  // status screen that says "72% used (7d)" makes the reader invert one of
+  // them, which is the mistake the convention exists to remove.
   const parts: string[] = [];
-  parts.push(`${account.headroomPct.toFixed(0)}% on ${account.bindingWindow} now`);
+  parts.push(`${(100 - account.headroomPct).toFixed(0)}% used on ${account.bindingWindow} now`);
   if (weekly.pct !== null && account.bindingWindow !== weekly.window) {
-    parts.push(`${weekly.pct.toFixed(0)}% of its ${weekly.window} budget`);
+    parts.push(`${(100 - weekly.pct).toFixed(0)}% of its ${weekly.window} budget used`);
   }
-  if (fiveHourIsBinding && !fiveHourHasRoom) {
+  if (!fiveHourHasRoom && fiveHour !== null) {
     parts.push(
-      bindingResetsInMs === null
+      fiveHourResetsInMs === null
         ? 'its 5h window is spent and its reset time is unknown'
-        : `its 5h window resets in ${formatDuration(bindingResetsInMs)}${resetsInsideHorizon ? '' : ', after the horizon'}`,
+        : `its 5h window resets in ${formatDuration(fiveHourResetsInMs)}${resetsInsideHorizon ? '' : ', after the horizon'}`,
     );
   }
   if (weekly.pct === null) parts.push('no weekly reading, so ranked on the binding window alone');
