@@ -20,7 +20,15 @@ import {
 } from './config/load.js';
 import type { Config } from './config/schema.js';
 import { performCheckpoint } from './core/checkpoint.js';
-import { type TickContext, loop, managerFor, readUsage, tick } from './core/daemon.js';
+import {
+  type TickContext,
+  type TickExitCode,
+  exitCodeFor,
+  loop,
+  managerFor,
+  readUsage,
+  tick,
+} from './core/daemon.js';
 import type { Strategy } from './accounts/select.js';
 import { Logger } from './core/log.js';
 import { renderManifestMarkdown, parseManifest } from './core/manifest.js';
@@ -47,8 +55,12 @@ import {
   setDisabled,
   swapAccounts,
   switchCommand,
+  tokenStatus,
+  unclaimedAccounts,
   unmapCommand,
 } from './commands/accounts.js';
+import { runPurge } from './commands/purge.js';
+import { runUpgrade } from './commands/upgrade.js';
 import { runPredict } from './commands/predict.js';
 import { runAsAccount } from './commands/runAs.js';
 import { runTui } from './tui/app.js';
@@ -59,6 +71,14 @@ function usage(out: (line: string) => void, line: string): number {
   out(`usage: ${line}`);
   return 1;
 }
+
+/** The `daemon --once` contract, in one line each, for the human-readable form. */
+const EXIT_MEANINGS: Record<TickExitCode, string> = {
+  0: 'nothing to do',
+  1: 'acted',
+  2: 'would act, but could not',
+  3: 'error',
+};
 
 interface Argv {
   command: string;
@@ -89,6 +109,9 @@ const BOOLEAN_FLAGS = new Set([
   'overwrite',
   'from-cswap',
   'unset',
+  'check',
+  'token-status',
+  'unclaimed',
 ]);
 
 export function parseArgv(argv: string[]): Argv {
@@ -136,6 +159,9 @@ watching
 
 accounts
   accounts [list]           every managed account with its binding window
+  accounts --token-status   which store each credential came from, and its expiry
+  accounts unclaimed        stored credentials no account in the roster claims
+  accounts unclaimed --purge <id>   delete exactly one of them (needs --yes)
   accounts add              capture the login Claude Code is using right now
   accounts add-token [-]    register a setup token or API key (- reads stdin)
   accounts remove <ref>     forget an account and its stored credential
@@ -158,6 +184,8 @@ setup
   install-scheduler         run the watcher every minute (systemd / launchd / Task Scheduler)
   uninstall-scheduler       stop it
   doctor                    check every assumption rotorcc makes, and say which are false
+  upgrade [--check]         update rotorcc itself; --check only reports availability
+  purge --yes               delete every file rotorcc owns (lists them first)
 
 running
   daemon [--once]           watch account headroom and act on it
@@ -188,6 +216,16 @@ options
   --once                    one iteration and exit (daemon, tui)
   --slot <n>, --email <e>, --alias <a>   for accounts add / add-token
   -h, --help, -v, --version
+
+exit codes for "daemon --once", so a cron job can branch on them
+  0  nothing to do          headroom is fine; rotorcc changed nothing
+  1  acted                  warned, checkpointed, queued a handover, or switched
+  2  would act, but could not   refused, blocked, exhausted, or the lock was held
+  3  error                  the tick could not complete, or an action failed
+Under --dry-run the code reports what it WOULD have done; nothing is written.
+
+"upgrade" exits 0 when already current or upgraded, 1 when an upgrade is
+available (--check) or the upgrade failed, and 2 when it could not tell.
 
 rotorcc never invents a number. An account it could not measure reports
 "unknown" with the reason, and null in --json — never 0 and never 100.
@@ -355,12 +393,17 @@ async function main(): Promise<number> {
       };
       if (flags.once === true) {
         const result = await tick(tickCtx);
-        if (flags.json === true) out(JSON.stringify(result, null, 2));
+        const code = exitCodeFor(result);
+        // The code is in the JSON too. A caller that already parses the output
+        // should not have to re-derive the one number it is going to branch on,
+        // and re-deriving it is how the two drift apart.
+        if (flags.json === true) out(JSON.stringify({ ...result, exitCode: code }, null, 2));
         else {
           out(result.detail);
           for (const action of result.actionsTaken) out(`  ${action}`);
+          out(`exit ${code}: ${EXIT_MEANINGS[code]}`);
         }
-        return result.ok ? 0 : 1;
+        return code;
       }
       const controller = new AbortController();
       process.on('SIGINT', () => controller.abort());
@@ -495,9 +538,17 @@ async function main(): Promise<number> {
         return Number.isInteger(value) ? value : undefined;
       };
 
+      // `--token-status` reads as a modifier of the account listing rather than
+      // a verb, so it is a flag on any accounts form rather than a subcommand.
+      if (flags['token-status'] === true) return tokenStatus(accountsCtx);
+
       switch (sub) {
         case 'list':
           return listAccounts(accountsCtx, flags.force === true);
+        case 'unclaimed':
+          return unclaimedAccounts(accountsCtx, {
+            ...(typeof flags.purge === 'string' ? { purge: flags.purge } : {}),
+          });
         case 'add':
           return addAccount(accountsCtx, {
             ...(numberFlag('slot') !== undefined ? { slot: numberFlag('slot') as number } : {}),
@@ -639,6 +690,36 @@ async function main(): Promise<number> {
         out('flags cleared');
       }
       return 0;
+    }
+
+    case 'upgrade': {
+      const ctx = contextFor(flags);
+      const result = await runUpgrade({
+        binaryPath: resolveBinary(),
+        check: flags.check === true,
+        dryRun: ctx.dryRun,
+        json: flags.json === true,
+        config: ctx.config,
+        store: ctx.store,
+        ...(ctx.configPath === undefined ? {} : { configPath: ctx.configPath }),
+        ...(typeof flags.repo === 'string' ? { repoRoot: flags.repo } : {}),
+        out,
+      });
+      return result.code;
+    }
+
+    case 'purge': {
+      const ctx = contextFor(flags);
+      return runPurge({
+        config: ctx.config,
+        manager: managerFor(ctx.config),
+        store: ctx.store,
+        ...(ctx.configPath === undefined ? {} : { configPath: ctx.configPath }),
+        yes: flags.yes === true,
+        dryRun: ctx.dryRun,
+        json: flags.json === true,
+        out,
+      });
     }
 
     case 'doctor': {

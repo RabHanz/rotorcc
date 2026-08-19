@@ -8,8 +8,20 @@
     "rotation",
     "checkpoint",
     "rate-limit",
-    "session"
+    "session",
+    "claude",
+    "claude-code",
+    "account-switcher",
+    "quota"
   ],
+  "homepage": "https://github.com/RabHanz/rotorcc#readme",
+  "bugs": {
+    "url": "https://github.com/RabHanz/rotorcc/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RabHanz/rotorcc.git"
+  },
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -28,10 +40,12 @@
   },
   "files": [
     "dist",
+    "docs/adr",
     "README.md",
     "ARCHITECTURE.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -41,7 +55,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "dev": "tsx src/cli.ts",
-    "prepublishOnly": "npm run build"
+    "leak-audit": "bash scripts/leak-audit.sh",
+    "prepublishOnly": "npm run leak-audit && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "zod": "^3.24.1"

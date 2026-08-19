@@ -5,3 +5,8 @@ coverage/
 .DS_Store
 *.log
 .tmp/
+# `rotorcc upgrade` stages a build here and parks the outgoing one here, so that
+# a failed build can never touch the dist/ this machine is running from.
+.rotorcc-upgrade/
+.rotorcc-dist-previous/
+*.tgz
