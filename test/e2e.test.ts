@@ -316,15 +316,23 @@ describe('end to end', () => {
     expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
   });
 
-  it('treats a limit message in the transcript as a rotation, whatever the numbers say', async () => {
+  it('does NOT treat a limit message as a hard kill while the session is alive', async () => {
+    // Updated 2026-08-19. This test previously asserted the exact defect that
+    // corrupted a live session: a limit string in the transcript triggered a
+    // hard-kill rotation "whatever the numbers say" — and the string was a
+    // SUBAGENT dying, not the operator. Liveness is now ground truth: a signature
+    // in the tail of a LIVE session is ignored. Rotation on genuine low headroom
+    // still happens (that is what `switched:` is), but never a hard-kill
+    // successor onto a running session.
     setUsage(usageState, { 1: 95, 2: 20, 3: 99 }, 1);
     appendTranscript(
       '{"type":"assistant","text":"You\'ve hit your session limit · resets at 5am"}',
     );
 
+    // The e2e harness's session process is the live test runner, so the session
+    // reads as alive. A hard kill must NOT be declared.
     const result = await tick(ctx());
-    expect(result.hardKill).toBe('limit-signature');
-    expect(result.actionsTaken).toContain('switched:3');
+    expect(result.hardKill).toBeNull();
   });
 
   it('changes nothing on disk under --dry-run', async () => {

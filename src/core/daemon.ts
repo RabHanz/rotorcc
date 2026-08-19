@@ -119,22 +119,41 @@ async function detectHardKill(
   const session = newestSessionAcrossProjects(ctx.config);
   if (session === null) return null;
 
+  // Liveness is the GROUND TRUTH and is checked first. A signature in the
+  // transcript is only ever corroborating evidence, never sufficient on its own.
+  //
+  // 2026-08-19: this launched a duplicate session onto a LIVE one. The transcript
+  // tail carried "You've hit your session limit" — but that was six SUBAGENTS
+  // dying, recorded as their task-notification results, not the main session. The
+  // detector matched the string and declared the whole session hard-killed while
+  // its process was still running and working. Two `claude --continue` then shared
+  // one worktree. A successor must NEVER be launched while the predecessor is
+  // alive: that is not resumption, it is corruption.
+  const liveness = await checkLiveness(ctx.config, session.transcriptPath);
+  if (!liveness.dead) {
+    // The session process is alive. Whatever the transcript says, it is not dead.
+    // A limit message from a subagent is not a reason to replace a working
+    // operator. Do nothing.
+    return null;
+  }
+
   const tail = await readTail(session.transcriptPath, ctx.config.hardKill.tailBytes);
   const signatures = ctx.config.hardKill.transcriptSignatures;
   const direct = detectLimitSignature(tail, signatures);
   const unescaped = direct.hit ? direct : detectLimitSignature(unescapeJsonish(tail), signatures);
   if (unescaped.hit) {
-    return { kind: 'limit-signature', detail: `transcript tail matched "${unescaped.signature}"` };
-  }
-
-  const liveness = await checkLiveness(ctx.config, session.transcriptPath);
-  if (liveness.dead) {
+    // Dead process AND a limit signature: a real hard kill.
     return {
-      kind: 'dead-process',
-      detail: `transcript idle for ${Math.round(liveness.idleSeconds)}s with no live process`,
+      kind: 'limit-signature',
+      detail: `process gone and transcript tail matched "${unescaped.signature}"`,
     };
   }
-  return null;
+
+  // Dead process with no signature: idle death (crash, closed terminal).
+  return {
+    kind: 'dead-process',
+    detail: `transcript idle for ${Math.round(liveness.idleSeconds)}s with no live process`,
+  };
 }
 
 export interface ActionEffects {
@@ -337,6 +356,14 @@ async function rotate(
     .replace(/\{\{manifestJson\}\}/g, checkpoint.manifestPath ?? '(no manifest)')
     .replace(/\{\{account\}\}/g, String(action.targetAccount));
 
+  // Re-check liveness at the moment of launch, not from any earlier reading. A
+  // successor replaces a DEAD session; if this operator is still alive, launching
+  // beside it puts two operators on one worktree. This is the fact that must gate
+  // the launch, and it is taken fresh here so no stale decision can bypass it.
+  const predecessorLiveness = await checkLiveness(
+    config,
+    newestSessionAcrossProjects(config)?.transcriptPath ?? '',
+  );
   const launch = await launchSuccessor({
     config,
     logger,
@@ -344,6 +371,7 @@ async function rotate(
     prompt,
     dryRun: ctx.dryRun,
     preferTarget: predecessor ?? undefined,
+    predecessorAlive: !predecessorLiveness.dead,
   });
   logger.info('successor launch', {
     ok: launch.ok,

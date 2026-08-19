@@ -32,6 +32,14 @@ export interface LaunchContext {
    * already looking at.
    */
   preferTarget?: string | undefined;
+  /**
+   * Whether the session this successor would replace is still running. A
+   * successor is only ever a replacement for a dead session; `launchSuccessor`
+   * refuses when this is `true`. Left optional so older callers still typecheck,
+   * but the daemon must always set it from a live liveness check taken at launch
+   * time, not from a stale earlier reading.
+   */
+  predecessorAlive?: boolean;
 }
 
 export interface LaunchResult {
@@ -254,6 +262,27 @@ async function launchScreen(ctx: LaunchContext): Promise<LaunchResult> {
 }
 
 export async function launchSuccessor(ctx: LaunchContext): Promise<LaunchResult> {
+  // Final guard, at the moment of launch, independent of whatever decided a
+  // successor was wanted. A successor exists to REPLACE a dead session; if the
+  // predecessor is still alive we would be spawning a second operator onto its
+  // worktree. That is corruption, not resumption, and it must be impossible.
+  //
+  // 2026-08-19: the tick logged `predecessor:left-running` and launched anyway.
+  // The two facts — "predecessor alive" and "launch a successor" — are mutually
+  // exclusive and are now enforced here so no upstream logic error can produce
+  // the pair again.
+  if (ctx.predecessorAlive === true) {
+    return {
+      ok: false,
+      launcher: ctx.config.successor.launcher,
+      detail:
+        'refused: the predecessor session is still alive. A successor replaces a dead ' +
+        'session; launching one beside a live session would put two operators on one worktree.',
+      handle: null,
+      promptConfirmed: false,
+      warnings: ['successor-refused-predecessor-alive'],
+    };
+  }
   switch (ctx.config.successor.launcher) {
     case 'tmux':
       return launchTmux(ctx);
