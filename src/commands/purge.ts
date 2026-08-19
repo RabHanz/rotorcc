@@ -78,7 +78,10 @@ export function sizeOf(path: string, depth = 0): number {
 export function humanBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  // A transcript store reaches gigabytes on a machine that has been running
+  // agents for a month. "6207.0 MB" is a number nobody reads as six gigabytes.
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 /**
@@ -156,12 +159,21 @@ export function protectedPaths(
   config: Config,
   env: NodeJS.ProcessEnv = process.env,
 ): Array<{ path: string; what: string }> {
-  return [
+  const entries = [
     { path: claudeCredentialsPath(env), what: "Claude Code's own OAuth credential" },
     { path: claudeGlobalConfigPath(env), what: "Claude Code's global config" },
     { path: claudeConfigHome(env), what: "Claude Code's home, including your transcripts" },
     { path: config.claudeHome, what: 'the Claude Code home this config points at' },
   ];
+  // The last two are usually the same directory reached two ways. Printing it
+  // twice makes a short, load-bearing list look careless, and a list nobody
+  // reads carefully is not a promise anybody can check.
+  const seen = new Set<string>();
+  return entries.filter((entry) => {
+    if (seen.has(entry.path)) return false;
+    seen.add(entry.path);
+    return true;
+  });
 }
 
 export function runPurge(ctx: PurgeContext): number {

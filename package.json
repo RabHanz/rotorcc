@@ -1,6 +1,6 @@
 {
   "name": "rotorcc",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Zero-loss account rotation and continuous checkpointing for long Claude Code sessions.",
   "keywords": [
     "cli",

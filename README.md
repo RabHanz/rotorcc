@@ -44,6 +44,12 @@ rotorcc install-scheduler       # a one-minute tick: systemd, launchd or Task Sc
 rotorcc doctor                  # confirms every assumption it makes
 ```
 
+Install it as a **package**, not as a checkout, unless you are working on
+rotorcc itself. A global install has one copy and one version; a checkout that
+somebody linked onto their PATH months ago is how you end up rebuilding one
+rotorcc and running another. `rotorcc upgrade` handles both, and says which
+shape it found.
+
 That is the whole setup. From then on:
 
 ```bash
@@ -52,16 +58,16 @@ rotorcc status                  # the same facts, printed once
 ```
 
 ```
-rotorcc 0.1.0                                                            20:20:47
+rotorcc 0.2.0                                                            20:20:47
 
 ACCOUNTS
-    #1  work                       ░░░░░░░░░░░░░░░░   0% 5h      resets 19 Aug 20:30
-    #2  spare                      ███████░░░░░░░░░  45% 7d      resets 24 Aug 09:00
+    #1  work                       ████████████████ 100% used 5h      resets 19 Aug 20:30
+    #2  spare                      ████████░░░░░░░░  55% used 7d      resets 24 Aug 09:00
   ▸ #3  personal                   unknown                  quota read failed: http-429
-  thresholds: warn 15% · soft 10% · rotate 5%
+  thresholds: warn at 85% used · soft at 90% · rotate at 95%
 
 PREDICTION
-  reaches 5% headroom in 2.3h
+  reaches 95% used in 2.3h
   18.4 points/hour · medium confidence · least-squares fit over 14 samples
   spanning 41 minutes (R²=0.79)
   work finishes first? likely no — 45% left is under the estimated 62% needed
@@ -79,14 +85,53 @@ DURABILITY
   watcher      systemd timer active
 
 RECENT DECISIONS
-  20:19 refused       12%     unsaved work on a protected branch; checkpointed instead
-  20:18 checkpointed  14%     headroom 14.2% on 5h; soft checkpoint requested
-  20:17 idle          16%     headroom 16.1% on 5h; nothing to do
+  20:19 refused       88% used   unsaved work on a protected branch; checkpointed instead
+  20:18 checkpointed  86% used   soft checkpoint requested
+  20:17 idle          84% used   nothing to do
 ```
 
-Note account #1: an **empty bar at 0%** — a real measurement of a spent window.
-Account #3 has **no bar at all**, because an empty bar and a genuine 0% look
-identical and only one of them is a measurement.
+Note account #1: a **full bar at 100% used** — a real measurement of a spent
+window. Account #3 has **no bar at all**, because a full bar and a genuine
+"we could not read this" look identical and only one of them is a measurement.
+
+## Updating
+
+```bash
+rotorcc upgrade                 # fetch, install, rebuild, re-verify, run doctor
+rotorcc upgrade --check         # is there a new one? (0 current, 1 available)
+```
+
+It works out for itself whether this machine has a **package install** (it
+reinstalls from the registry) or a **git checkout** (it fast-forwards, reinstalls
+dependencies and rebuilds), and it refuses rather than improvises:
+
+- a dirty tree, or a branch that has **diverged** from its remote. Fast-forward
+  only, always. There is no merge, no rebase and no reset anywhere in that path.
+- a checkout whose `dist/` is not what your PATH actually resolves to. Upgrading
+  a copy you do not run is the failure that makes every later bug report be
+  about code that was never deployed.
+
+It is safe to run while the watcher is ticking. The build is staged in a
+temporary directory and swapped in by rename, so a failed build never touches
+the `dist/` you are running from, and the upgrade holds rotorcc's own tick lock
+so a watcher tick that lands mid-upgrade declines and says so (exit 2) rather
+than running against half-installed files.
+
+Afterwards it asks the **new** binary for its version and runs its `doctor`,
+because a check made by the old process is a check of the build you just
+replaced.
+
+### Updating a from-source install, in one line
+
+For a checkout at `~/rotorcc` with its remote set. Copy-pasteable, and it stops
+at the first failure rather than half-upgrading:
+
+```bash
+cd ~/rotorcc && git diff --quiet && git diff --cached --quiet && git pull --ff-only && pnpm install --frozen-lockfile && pnpm build && rotorcc doctor || { echo "!! rotorcc update FAILED or the tree is dirty — nothing further was applied" >&2; false; }
+```
+
+That is the bootstrap. Once it has run once, `rotorcc upgrade` does all of the
+above with the refusals, the staged build and the verification.
 
 ## What it does, in three layers
 
@@ -96,12 +141,20 @@ then commit and push every watched worktree. Transcripts are append-only, so
 after the first snapshot each one costs a few kilobytes. The heavy half runs in
 a detached process, so a hook never makes you wait on a git push.
 
-**Rotation as a handover, not an interruption.** A Claude Code process reads its
-credential once, when it launches — there is no way to change a live session's
-account. So rotorcc does not try. When the weekly window runs low it records
-which account the **next** session should open on, and the `SessionStart` hook
-switches before that session begins. Your running work is never interrupted and
-no second process is ever spawned.
+**Rotation happens under the running session.** A Claude Code session reads its
+credential from disk on **every request**, not once at launch — measured on
+2026-08-19 against v2.1.235, not assumed. So rotorcc changes the credential in
+place and the session carries on: no successor, no new pane, no cold start, no
+lost context, and no way to end up with two agents on one worktree. It verifies
+the swap took rather than assuming it did, and it falls back to the older
+replace-the-session path on evidence that it did not. See
+[ADR 0003](docs/adr/0003-live-credential-hot-swap.md) for the experiment and for
+why the fallback is not deprecated: hot-swap is undocumented behaviour of a
+client nobody here controls, and a tool whose rotation breaks silently on the
+day that changes is the failure this one exists to prevent.
+
+`rotation.mode` is `auto` (hot-swap, verify, fall back), `hotswap` (never
+replace a session) or `successor` (always replace one).
 
 **The weekly window is what matters.** The 5-hour window refills several times a
 day; the 7-day one is the budget you actually regret spending early. So the
@@ -148,16 +201,18 @@ Read this part. A backup tool that oversells itself is worse than none.
   a tool call and the moment the result comes back, there is state in a running
   process that is not on disk anywhere. No tool can save it — not this one, not
   any other. rotorcc makes the window one tool call wide. It does not close it.
-- **A credential switch only takes effect at process start.** The CLI reads its
-  credentials once, when it launches. There is no such thing as rotating a live
-  session, and rotorcc does not pretend otherwise: it changes the account the
-  **next** session opens on. The consequence is that a session which runs for
-  another six hours runs those hours on the old account. That is the correct
-  trade — the alternative is killing it — but it is why the weekly threshold
-  fires early, and why `rotorcc tui` shows you a queued handover before it
-  happens.
-- **A handover is not immediate.** See above. If you want the new account now,
-  end the session and start a new one, or run `rotorcc switch` yourself.
+- **A hot swap cannot be fully verified from outside.** rotorcc can prove the
+  credential and the identity block on disk are the target's, and it can watch
+  the live session for an authentication failure. It cannot read another
+  process's memory. So a session that made no request during the watch is
+  reported as `unobserved`, not as `verified`, and `auto` falls back only on
+  evidence of failure — never on the absence of evidence of success, because
+  falling back means replacing a session that is very probably fine.
+- **Hot-swap depends on undocumented client behaviour.** It works today and it
+  was measured rather than assumed. It could stop working in any Claude Code
+  release with no announcement. That is exactly why the successor path is kept
+  fully working; if hot-swap stops, set `rotation.mode` to `successor` and
+  rotation keeps happening the old way.
 - **It cannot resume a conversation that was never saved.** `--continue` needs a
   prior session in that directory. rotorcc detects when there is not one and says
   so instead of pretending the successor started clean.
@@ -205,23 +260,25 @@ In the dashboard: `q` quit, `r` refresh now, `p` pause.
 
 ### Accounts
 
-|                                    |                                                      |
-| ---------------------------------- | ---------------------------------------------------- |
-| `rotorcc accounts`                 | every managed account with its binding window        |
-| `rotorcc accounts add`             | capture the login Claude Code is using right now     |
-| `rotorcc accounts add-token -`     | register a setup token or API key, read from stdin   |
-| `rotorcc accounts remove <ref>`    | forget an account and its stored credential          |
-| `rotorcc accounts alias <ref> <n>` | give it a short name (`--unset` to clear)            |
-| `rotorcc accounts disable <ref>`   | hold it out of automatic rotation                    |
-| `rotorcc accounts enable <ref>`    | put it back                                          |
-| `rotorcc accounts swap <a> <b>`    | exchange two slots, credentials and all              |
-| `rotorcc accounts move <ref> <n>`  | put an account in a specific slot                    |
-| `rotorcc accounts import`          | one-off migration (`--from-cswap`)                   |
-| `rotorcc accounts export <path>`   | a portable copy — **contains real credentials**      |
-| `rotorcc switch [ref]`             | change account now; no ref means pick by strategy    |
-| `rotorcc run <ref> -- <cmd>`       | run as an account, this terminal only                |
-| `rotorcc map [ref] [path]`         | bind a directory to an account; bare form lists them |
-| `rotorcc unmap [path]`             | remove a binding                                     |
+|                                    |                                                       |
+| ---------------------------------- | ----------------------------------------------------- |
+| `rotorcc accounts`                 | every managed account with its binding window         |
+| `rotorcc accounts --token-status`  | which store each credential came from, and its expiry |
+| `rotorcc accounts unclaimed`       | stored credentials no account in the roster claims    |
+| `rotorcc accounts add`             | capture the login Claude Code is using right now      |
+| `rotorcc accounts add-token -`     | register a setup token or API key, read from stdin    |
+| `rotorcc accounts remove <ref>`    | forget an account and its stored credential           |
+| `rotorcc accounts alias <ref> <n>` | give it a short name (`--unset` to clear)             |
+| `rotorcc accounts disable <ref>`   | hold it out of automatic rotation                     |
+| `rotorcc accounts enable <ref>`    | put it back                                           |
+| `rotorcc accounts swap <a> <b>`    | exchange two slots, credentials and all               |
+| `rotorcc accounts move <ref> <n>`  | put an account in a specific slot                     |
+| `rotorcc accounts import`          | one-off migration (`--from-cswap`)                    |
+| `rotorcc accounts export <path>`   | a portable copy — **contains real credentials**       |
+| `rotorcc switch [ref]`             | change account now; no ref means pick by strategy     |
+| `rotorcc run <ref> -- <cmd>`       | run as an account, this terminal only                 |
+| `rotorcc map [ref] [path]`         | bind a directory to an account; bare form lists them  |
+| `rotorcc unmap [path]`             | remove a binding                                      |
 
 `<ref>` is a slot number, an email, or an alias.
 
@@ -240,6 +297,62 @@ In the dashboard: `q` quit, `r` refresh now, `p` pause.
 | `rotorcc resume`                 | print the plan from the last manifest                 |
 | `rotorcc config [set K V]`       | read or change one setting, revalidated               |
 | `rotorcc doctor`                 | check everything, and say which assumptions are false |
+| `rotorcc upgrade [--check]`      | update rotorcc itself, then prove the new build runs  |
+| `rotorcc purge --yes`            | delete every file rotorcc owns, listed first          |
+
+### Recovering an orphaned credential
+
+A switch stashes the account it is leaving before it activates the one it is
+going to, so a crash in the wrong millisecond can leave a real login at a slot
+nothing points at any more. Nothing else surfaces those.
+
+```bash
+rotorcc accounts unclaimed                       # what is there, and why
+rotorcc accounts unclaimed --purge <id> --yes    # delete exactly one
+```
+
+Purge takes one exact id. There is no bulk form and there will not be one: an
+id that matches nothing is an error, because "it deleted something, just not
+that" is worse than doing nothing. On macOS this scans the credential **files**
+only — a stash held in the Keychain cannot be listed without a prompt, and the
+command says so rather than implying it looked everywhere.
+
+### Uninstalling
+
+```bash
+rotorcc purge          # lists every path it would delete, and deletes nothing
+rotorcc purge --yes    # actually does it
+```
+
+It enumerates first, with sizes and with what is irreversible marked as such,
+and it never touches Claude Code's own credential, config or home — those are
+listed under "NOT touched" so the promise is checkable rather than merely
+stated. Hooks inside a project's `settings.json` and the scheduler unit are
+edits to files rotorcc does not own, so it names them and gives you the command
+instead of reaching in.
+
+Export first if any of those logins are your only copy:
+`rotorcc accounts export ~/rotorcc-accounts.json --yes`.
+
+### Exit codes for `daemon --once`
+
+For a cron line that needs to branch on what happened:
+
+| code |                                                                     |
+| ---- | ------------------------------------------------------------------- |
+| `0`  | nothing to do — headroom is fine and rotorcc changed nothing        |
+| `1`  | acted — warned, checkpointed, queued a handover, or switched        |
+| `2`  | would act, but could not — refused, blocked, exhausted, lock held   |
+| `3`  | error — the tick could not complete, or an action it started failed |
+
+Precedence is error, then blocked, then acted, then nothing: a tick that
+checkpointed **and** refused to rotate is a `2`, because the refusal is the part
+a human has to decide about. A tick that could not run because another rotorcc
+operation held the lock is also a `2` and never a `0` — it did not look, so it
+is in no position to say there was nothing to see. Under `--dry-run` the code
+reports what rotorcc _would_ have done; nothing is written on that path.
+
+`--json` carries the same number as `exitCode`, so nothing has to re-derive it.
 
 ### Flags
 
@@ -335,6 +448,53 @@ settings you are most likely to change:
 `rotorcc config validate` checks it. `rotorcc config set thresholds.rotatePct 3`
 changes one value and revalidates before saving, so a typo is rejected rather
 than stored.
+
+## Deliberately not built
+
+Stated here rather than left as an implied gap, because "we did not get to it"
+and "we decided against it" look identical from outside and only one of them is
+a plan.
+
+- **A macOS menubar app.** rotorcc is a terminal tool for people who live in a
+  terminal. A menubar surface would be a second UI to keep truthful, on the one
+  platform where the credential store has a backend the maintainers cannot
+  exercise, for an audience that already has `rotorcc tui` in a pane. If you
+  want an always-visible indicator, `rotorcc status --json` is one line of
+  shell away from anything that renders JSON.
+- **Windows Credential Manager.** Credentials on Windows are stored as `0600`
+  files under `%LOCALAPPDATA%`, the same as everywhere else. Moving them into
+  Credential Manager would be better, and it is not being written blind: the
+  maintainers have no Windows machine to verify it on, and a credential backend
+  that has never actually been exercised is worse than a simple one that has.
+  `rotorcc doctor` names the platform so nobody has to guess which applies.
+- **Enumerating Keychain-held credentials on macOS.** `security` has no listing
+  that works without a prompt, so `rotorcc accounts unclaimed` scans the
+  credential files and says out loud that it did not scan the Keychain, rather
+  than reporting a clean store it did not fully inspect.
+
+The macOS Keychain path itself is written, used, and **verified rather than
+trusted**: every write is read back and compared, and a mismatch throws so the
+caller falls to the file backend deliberately and with a reason instead of
+accidentally and without one. That check cannot be exercised on the maintainers'
+machines, which is precisely why it is a check.
+
+## What the numbers mean
+
+**rotorcc reports what has been USED, with the window named.** `82% used (5h)`,
+not `18% left`. Anthropic's API reports utilisation and so does Claude Code's
+status line, so reporting headroom made you invert one screen in your head while
+comparing two — and a bare percentage is worse: `99% (5h)` returns within the
+hour and `99% (7d)` does not, and printing `99%` cannot tell you which you are
+looking at. Both of those caused a reporting error here before the convention
+changed.
+
+An account rotorcc could not measure has **no bar and no number**, on every
+screen, with the reason beside it.
+
+In `--json`, each account carries `usedPct`, `headroomPct` and `window`
+separately. `headroomPct` keeps its original meaning: inverting a field while
+keeping its name would make an existing reader see `99` and conclude "healthy"
+when it means "nearly gone". Both are `null` when the account was not measured.
 
 ## Privacy and safety
 
@@ -444,25 +604,38 @@ npm install
 npm run typecheck
 npm test
 npm run build
+npm run leak-audit
 ```
+
+Publishing (maintainers): `npm login`, then `npm publish`. `prepublishOnly`
+runs the leak audit, the typecheck, the whole suite and a fresh build first, so
+a published tarball cannot contain a stale `dist/` or a failing tree. Check what
+is going out with `npm pack --dry-run` before you do it — the `files` list is a
+whitelist, and a package is a permanent public artefact.
 
 Tests use real git repositories in temp directories, a temp Claude home, and an
 injected `fetch`, so **no test reaches the network or touches a real
 credential**, and the suite runs identically on all three platforms.
 
-400 tests. The ones worth reading first are
+572 tests. The ones worth reading first are
 `test/unknown-is-unknown.test.ts` — the one rule, walked across every surface
-that could break it — and `test/credentials-switch.test.ts`, which is about the
-ways a switch could destroy a login rather than the way it works.
+that could break it — `test/credentials-switch.test.ts`, which is about the ways
+a switch could destroy a login rather than the way it works, and the last group
+in `test/worktrees.test.ts`, which pins the invariant that stops the sweep
+publishing a tree that is not a descendant of what it overwrites.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the exact rotation
 timeline, and [docs/adr/](docs/adr/) for the decisions and what they rejected:
 
 - [ADR 0001](docs/adr/0001-own-the-account-layer.md) — why rotorcc owns its
   account layer instead of composing with a switcher.
-- [ADR 0002](docs/adr/0002-handover-not-interruption.md) — why rotation is a
-  handover to the next session rather than an interruption of this one, and why
-  the weekly window is the signal that matters.
+- [ADR 0002](docs/adr/0002-handover-not-interruption.md) — why the weekly window
+  is the signal that matters, and why an exhausted fleet stops rather than
+  thrashing. Its central factual claim is superseded by 0003; its judgement is
+  not.
+- [ADR 0003](docs/adr/0003-live-credential-hot-swap.md) — the experiment showing
+  a live session CAN be moved to another account, what that changed, and why the
+  old mechanism is kept anyway.
 
 ## Licence and attribution
 

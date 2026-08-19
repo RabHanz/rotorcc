@@ -125,6 +125,12 @@ describe('protectedPaths', () => {
     expect(paths).toContain(join(w.config.claudeHome, '.credentials.json'));
     expect(paths).toContain(w.config.claudeHome);
   });
+
+  it('lists each path once, however many ways it was reached', () => {
+    const w = world();
+    const paths = protectedPaths(w.config, w.env).map((p) => p.path);
+    expect(new Set(paths).size).toBe(paths.length);
+  });
 });
 
 describe('runPurge', () => {
@@ -242,5 +248,7 @@ describe('humanBytes', () => {
     expect(humanBytes(0)).toBe('0 B');
     expect(humanBytes(2048)).toBe('2.0 KB');
     expect(humanBytes(5 * 1024 * 1024)).toBe('5.0 MB');
+    // A transcript store on a machine that has run agents for a month.
+    expect(humanBytes(6 * 1024 * 1024 * 1024)).toBe('6.0 GB');
   });
 });
