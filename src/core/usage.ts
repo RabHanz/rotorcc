@@ -30,23 +30,35 @@ const accountSchema = z
     alias: z.string().optional(),
     active: z.boolean().optional(),
     usageStatus: z.string().optional(),
+    // `.nullish()`, never `.optional()`. The switcher emits `"usage": null` for
+    // an account whose quota it could not fetch — a token needing re-auth, a
+    // transient API failure, an account it has not polled yet. `.optional()`
+    // accepts `undefined` and REJECTS `null`, which is how a single unreadable
+    // account blinded the entire reader on 2026-08-19: the operator hit their
+    // session limit while rotorcc printed "accounts unreadable" and never
+    // rotated, with two healthy accounts sitting right there.
     usage: z
       .object({
-        fiveHour: windowSchema.optional(),
-        sevenDay: windowSchema.optional(),
-        scoped: z.array(scopedWindowSchema).optional(),
+        fiveHour: windowSchema.nullish(),
+        sevenDay: windowSchema.nullish(),
+        scoped: z.array(scopedWindowSchema).nullish(),
       })
-      .optional(),
-    usageFetchedAt: z.string().optional(),
-    usageAgeSeconds: z.number().optional(),
+      .nullish(),
+    usageFetchedAt: z.string().nullish(),
+    usageAgeSeconds: z.number().nullish(),
   })
   .passthrough();
 
 export const listOutputSchema = z
   .object({
     schemaVersion: z.number().optional(),
-    activeAccountNumber: z.number().int().optional(),
-    accounts: z.array(accountSchema),
+    activeAccountNumber: z.number().int().nullish(),
+    // Deliberately `unknown`: accounts are parsed ONE AT A TIME in
+    // `readingFromListOutput`, so a single malformed entry can never discard the
+    // accounts that parsed cleanly. A rotation harness that fails closed on a
+    // partial read is worse than no harness — it reports confidently and does
+    // nothing.
+    accounts: z.array(z.unknown()),
   })
   .passthrough();
 
@@ -90,6 +102,13 @@ export interface UsageReading {
   activeAccountNumber: number | null;
   accounts: AccountReading[];
   source: 'list' | 'auto';
+  /**
+   * Account numbers the switcher emitted in a shape we could not parse. They are
+   * excluded from `accounts` but reported here so `status` and `doctor` can say
+   * so out loud. A harness that hides a partial read is how a rotation silently
+   * stops happening.
+   */
+  unreadableAccounts?: number[];
 }
 
 function clampPct(value: number): number {
@@ -109,7 +128,21 @@ export function readingFromListOutput(
 ): UsageReading {
   const parsed = listOutputSchema.parse(raw);
   const models = options.models ?? [];
-  const accounts: AccountReading[] = parsed.accounts.map((account) => {
+  // Parse each account on its own. One entry the switcher emitted in a shape we
+  // do not recognise must cost us THAT account, not every account — the whole
+  // point of a rotation harness is that it still works when something is wrong.
+  const unreadable: number[] = [];
+  const accounts: AccountReading[] = parsed.accounts.flatMap((rawAccount, index) => {
+    const result = accountSchema.safeParse(rawAccount);
+    if (!result.success) {
+      const n =
+        typeof rawAccount === 'object' && rawAccount !== null && 'number' in rawAccount
+          ? Number((rawAccount as { number?: unknown }).number)
+          : index + 1;
+      unreadable.push(Number.isFinite(n) ? n : index + 1);
+      return [];
+    }
+    const account = result.data;
     const windows: WindowReading[] = [];
     const usage = account.usage;
     if (usage?.fiveHour) {
@@ -155,7 +188,10 @@ export function readingFromListOutput(
       bindingWindow: binding?.name ?? 'unknown',
       bindingResetsAt: binding?.resetsAt,
       windows,
-      stale,
+      // An account the switcher could not fetch usage for is STALE, not empty.
+      // It reports zero headroom (never rotate onto an unknown) but must not
+      // silence the accounts that did report.
+      stale: stale || account.usage === null || account.usage === undefined,
     };
   });
 
@@ -165,6 +201,7 @@ export function readingFromListOutput(
       parsed.activeAccountNumber ?? accounts.find((a) => a.active)?.number ?? null,
     accounts,
     source: 'list',
+    unreadableAccounts: unreadable,
   };
 }
 

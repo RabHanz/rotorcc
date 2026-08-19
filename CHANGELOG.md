@@ -39,6 +39,35 @@ First release.
 
 ## Unreleased
 
+### Fixed (production, 2026-08-19) — the defect that cost a session
+
+- **One unreadable account blinded the whole reader, and no rotation ever fired.**
+  The operator burned to 99% of their limit while the watcher ticked every 60
+  seconds and `status` printed `accounts unreadable — expected object, received
+  null`. Two healthy accounts (45% and 91% headroom) were sitting right there.
+
+  Three compounding causes, all in `src/core/usage.ts`:
+  1. The switcher emits `"usage": null` for an account whose quota it could not
+     fetch — a token needing re-auth, a transient API failure, an account not yet
+     polled. The schema used `.optional()`, which accepts `undefined` and
+     **rejects `null`**.
+  2. The call site used `.parse()`, which throws on any failure, so one bad entry
+     discarded every good one.
+  3. Nothing downstream distinguished "no headroom" from "unknown headroom".
+
+  Now: `.nullish()` on every optional usage field; accounts parsed
+  **individually** with `safeParse`, so a malformed entry costs that account and
+  no other; an account with null or absent usage is reported **stale with 0%
+  headroom** — never rotated onto, never silently dropped; and any account numbers
+  that failed to parse come back on `UsageReading.unreadableAccounts` so `status`
+  and `doctor` can say so out loud. Four regression tests in
+  `test/usage-partial-read.test.ts` pin the exact production payload, including
+  the literal `"usage": null` entry.
+
+  The principle this violated: **a rotation harness that fails closed on a partial
+  read is worse than no harness — it reports confidently and does nothing.** This
+  is the third defect of that shape (both below), and the first to cost real work.
+
 ### Fixed (found in production dogfood, 2026-08-18)
 - Routine hook events (`SubagentStop`, `Stop`, `UserPromptSubmit`) committed every
   dirty tree with a `wip(rotorcc)` commit and pushed it. On a busy orchestrator
