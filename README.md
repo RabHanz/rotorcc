@@ -96,11 +96,23 @@ then commit and push every watched worktree. Transcripts are append-only, so
 after the first snapshot each one costs a few kilobytes. The heavy half runs in
 a detached process, so a hook never makes you wait on a git push.
 
-**Predictive rotation.** A one-minute tick reads live per-account usage and
-converts it to headroom. At 15% left it warns. At 10% it checkpoints everything
-and raises a flag your agent sees on its next turn: _commit, push, write your
-resume note now_. At 5% it writes the resume manifest, switches accounts and
-opens the replacement session with a prompt telling it to read the manifest.
+**Rotation as a handover, not an interruption.** A Claude Code process reads its
+credential once, when it launches — there is no way to change a live session's
+account. So rotorcc does not try. When the weekly window runs low it records
+which account the **next** session should open on, and the `SessionStart` hook
+switches before that session begins. Your running work is never interrupted and
+no second process is ever spawned.
+
+**The weekly window is what matters.** The 5-hour window refills several times a
+day; the 7-day one is the budget you actually regret spending early. So the
+weekly window drives the decision, and a spent 5-hour window with a healthy week
+makes rotorcc checkpoint and _wait_ rather than burn another account's week to
+escape something that comes back in three hours.
+
+**When every account is spent, it stops.** No rotation onto an exhausted
+account, no successor with nowhere to go, and nothing queued for later. It saves
+everything, prints a notice naming each account with its headroom and reset
+time, and waits for you.
 
 **Rotation that knows about work in flight.** This is the part a plain account
 switcher cannot do. Before rotating, rotorcc looks at what is actually running:
@@ -137,9 +149,15 @@ Read this part. A backup tool that oversells itself is worse than none.
   process that is not on disk anywhere. No tool can save it — not this one, not
   any other. rotorcc makes the window one tool call wide. It does not close it.
 - **A credential switch only takes effect at process start.** The CLI reads its
-  credentials once, when it launches. So there is no such thing as rotating a
-  live session. What rotorcc actually does is checkpoint, stop, switch, resume —
-  made tight enough that the seam is a few seconds instead of an hour.
+  credentials once, when it launches. There is no such thing as rotating a live
+  session, and rotorcc does not pretend otherwise: it changes the account the
+  **next** session opens on. The consequence is that a session which runs for
+  another six hours runs those hours on the old account. That is the correct
+  trade — the alternative is killing it — but it is why the weekly threshold
+  fires early, and why `rotorcc tui` shows you a queued handover before it
+  happens.
+- **A handover is not immediate.** See above. If you want the new account now,
+  end the session and start a new one, or run `rotorcc switch` yourself.
 - **It cannot resume a conversation that was never saved.** `--continue` needs a
   prior session in that directory. rotorcc detects when there is not one and says
   so instead of pretending the successor started clean.
@@ -264,8 +282,14 @@ settings you are most likely to change:
   ],
 
   // Percentages are HEADROOM LEFT, not usage. "rotatePct: 5" means
-  // "rotate when 5% of the binding window remains".
+  // "act when 5% of the binding window remains".
   "thresholds": { "warnPct": 15, "softPct": 10, "rotatePct": 5 },
+
+  // The WEEKLY handover point, and the one that actually decides whether to
+  // change accounts. 5 means "hand over when 5% of the week is left" (95%
+  // utilised). The 5-hour window never triggers a handover on its own.
+  "weeklyRotatePct": 5,
+  "weeklyWarnPct": 20, // warn, do not act
   "minTargetHeadroomPct": 20, // refuse to rotate onto an account this low
   "cooldownSeconds": 900, // no second rotation inside this
   "hysteresisPct": 5, // how far headroom must recover to re-arm
@@ -432,7 +456,13 @@ that could break it — and `test/credentials-switch.test.ts`, which is about th
 ways a switch could destroy a login rather than the way it works.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the exact rotation
-timeline, and [docs/adr/](docs/adr/) for the decisions and what they rejected.
+timeline, and [docs/adr/](docs/adr/) for the decisions and what they rejected:
+
+- [ADR 0001](docs/adr/0001-own-the-account-layer.md) — why rotorcc owns its
+  account layer instead of composing with a switcher.
+- [ADR 0002](docs/adr/0002-handover-not-interruption.md) — why rotation is a
+  handover to the next session rather than an interruption of this one, and why
+  the weekly window is the signal that matters.
 
 ## Licence and attribution
 

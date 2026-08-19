@@ -10,6 +10,68 @@ straight from Anthropic, and switches accounts itself. No external switcher is
 required, wrapped, or depended upon at runtime. See
 `docs/adr/0001-own-the-account-layer.md` for the ruling and what it rejects.
 
+### Changed — rotation is a handover, not an interruption (2026-08-19)
+
+The fourth defect of the same family, and the one that forced a redesign rather
+than a fix. rotorcc opened a second `claude --continue` onto a session that was
+alive and working: two operators, one worktree.
+
+`5258e96` fixed the immediate causes (a subagent's limit message read as the
+operator's; a successor launched despite a known-live predecessor). But that was
+a guard on a model that was wrong. The Director's question — _how does it stop a
+running session when work is already being done?_ — has one honest answer: **it
+cannot.** A Claude Code process reads its credential once, at launch. The old
+"checkpoint, switch, spawn a successor" design was therefore abandon-and-replace,
+and a new pane appearing was not a bug in it, it _was_ it.
+
+Full reasoning in [ADR 0002](docs/adr/0002-handover-not-interruption.md).
+
+- **The weekly window is the priority signal.** The 5-hour window refills several
+  times a day; the 7-day one is the budget an operator regrets spending early. A
+  spent 5-hour window with a healthy week now checkpoints and **waits** instead
+  of burning another account's week to escape something that returns in hours.
+  New `weeklyRotatePct` (default 5, i.e. 95% utilised) and `weeklyWarnPct` (20).
+  Per-model weekly caps fold into the weekly figure, because that is what they
+  are.
+- **A switch changes the account the NEXT session opens on.** `src/core/nextSession.ts`
+  records the intent; the `SessionStart` hook consumes it and switches before the
+  session begins. Nothing is interrupted, no successor is spawned, and a
+  duplicate is structurally impossible rather than merely guarded. The intent is
+  consumed exactly once and expires — this project has already shipped a defect
+  where a stale instruction was obeyed hours later.
+- **When every account is spent, rotorcc STOPS.** No rotation, no successor, and
+  no queued intent either — a handover onto an account with 4% of its week left
+  only moves the problem. It checkpoints, writes the manifest, raises a dedicated
+  `ALL_ACCOUNTS_EXHAUSTED` flag and prints a notice naming every account, its
+  headroom and its reset time. An account that could not be **measured** says so
+  rather than being omitted: "we could not read this" and "this is empty" mean
+  different things and only one of them means waiting will help.
+- **A successor is only ever a replacement for a dead process.** Never a
+  companion to a live one.
+- **The hooks are the intelligence layer.** `SessionStart` is where rotation
+  happens; the 60-second watcher becomes the safety net for genuinely dead
+  sessions rather than the primary mechanism.
+- The policy paths are **latched**, or a low window would mean a commit and a
+  push every sixty seconds for hours (the 2026-08-18 defect), and a full-screen
+  stop banner every minute would train an operator to scroll past the one
+  message that matters.
+- `rotation.enabled: false` now suppresses the queued handover too, since an
+  intent `SessionStart` would act on is still rotorcc switching by itself, just
+  later. It still names the account to move to — refusing to act is not a reason
+  to refuse to inform.
+- `rotorcc tui` and `rotorcc status` show the queued handover, and say plainly
+  when there is none.
+
+### Fixed — nine findings from an independent review (2026-08-19)
+
+A reviewer with no context read the diff cold and returned five P1 and four P2.
+All nine were real; none were refuted. Notably: a switch could report "nothing
+was written" **after** activating the target; a background quota poll refreshed
+tokens without holding Claude Code's credential locks; an uninspectable project
+was classified savable rather than needing a human, letting a rotation proceed
+past a repository whose git state had never been read; and `rotorcc run` left a
+plaintext credential in the temp directory on Ctrl-C.
+
 ### Added
 
 - Native account layer (`src/accounts/`): credential storage (macOS Keychain,
@@ -42,7 +104,12 @@ required, wrapped, or depended upon at runtime. See
 
 The rule, made structural: an unmeasured account reports `unknown` (null in
 JSON), never a number, everywhere. `headroomIsKnown()` is the one place that is
-decided; pinned by `test/unknown-is-unknown.test.ts`. 400 tests (was 238).
+decided; pinned by `test/unknown-is-unknown.test.ts`.
+
+**441 tests, up from 238.** The ones worth reading are
+`test/unknown-is-unknown.test.ts` (the rule, walked across every surface that
+could break it), `test/policy.test.ts` (the four rotation rules) and
+`test/credentials-switch.test.ts` (the ways a switch could destroy a login).
 
 ## [0.1.0] — unreleased
 
@@ -77,163 +144,3 @@ First release.
   `status`, `resume`, `config`, `doctor`, `hook`.
 - `--dry-run` on every command.
 - Typed configuration with a zod schema and `rotorcc config validate`.
-
-## Unreleased
-
-### Added — rotorcc owns its account layer (2026-08-19)
-
-rotorcc no longer shells out to an external account switcher. It manages its own
-accounts end to end: credential storage, the switch, quota reading, the roster,
-strategies, mappings. It works on a machine with no other switcher installed.
-
-The reasoning, and the four arguments against continuing to compose, are in
-[ADR 0001](docs/adr/0001-own-the-account-layer.md). The short version: rotorcc's
-whole policy is a function of one number per account, and getting that number by
-parsing another program's stdout meant it could become unavailable for reasons
-rotorcc could not see, classify, or degrade around. That is the 2026-08-19
-outage exactly.
-
-- **Credentials.** `src/accounts/credentials.ts` reads and writes Claude Code's
-  active login across the macOS Keychain, `~/.claude/.credentials.json` and
-  `~/.claude.json`, with a per-account stash of rotorcc's own. Every write is
-  atomic with `0600` set on the descriptor before any secret exists in the file.
-  "Absent" and "unreadable" never collapse into one answer. A credential read
-  from a backend that may lag is marked degraded and is never refreshed — a
-  refresh token is one-time, and spending a superseded one yields
-  `invalid_grant`, which looks exactly like a dead account.
-- **Locking.** `src/accounts/ccLock.ts` holds Claude Code's own
-  `proper-lockfile` credential and config locks, in Claude Code's order, at its
-  60s/10s staleness. Without this, a switch landing inside Claude Code's token
-  refresh is overwritten by the refreshed _old_ account's token and the backup
-  just taken holds a spent refresh token.
-- **Quota.** `src/accounts/oauth.ts` fetches `api.anthropic.com/api/oauth/usage`
-  directly and refreshes tokens against `platform.claude.com/v1/oauth/token`.
-  These are rotorcc's only network calls, both to Anthropic, both on the
-  operator's own credential. Every field parses as nullish and every window as
-  optional, so an absent or unrecognised piece costs that piece and not the read.
-- **Cache.** Last-good windows per account **with their age**, a three-minute
-  poll floor, exponential backoff, and the server's `Retry-After` honoured. A
-  failed read never becomes a percentage.
-- **The switch.** A five-step transaction with per-step rollback, all inside the
-  locks. It captures the account being left **before** activating the new one:
-  Claude Code rotates the live refresh token whenever it likes, and the copy
-  stashed at add-time is dead the moment it does.
-- **Migration.** `rotorcc accounts import --from-cswap` reads another switcher's
-  store once, read-only, one slot at a time so a corrupt entry costs that slot
-  and no other. It never modifies the source, and does not inherit its opinion
-  of which account is active — rotorcc establishes that by fingerprinting the
-  real credential on the machine.
-
-### Added — what makes rotorcc better than a headroom-only switcher
-
-- **Rotation that knows about work in flight.** Before rotating, rotorcc looks at
-  every watched worktree. Work it _cannot_ save — protected branch, mid-rebase,
-  no remote — is a **refusal**, not a warning: rotating ends the session that
-  owns it. And a target without enough headroom to _finish_ the running work is
-  refused rather than accepted as the least bad option.
-- **`rotorcc tui` / `rotorcc watch`.** A real terminal dashboard: per-account
-  headroom with the binding window and its reset, burn prediction with
-  confidence, unsaved work per tree and whether rotorcc could save it, snapshot
-  age, watcher health, and the last N decisions with the reason each was taken
-  or refused. Pure renderer, so the honesty rule is tested rather than eyeballed.
-  Colour from the terminal's own 16 colours, `NO_COLOR` honoured, SSH-safe.
-- **`rotorcc predict`.** Least-squares burn rate per (account, quota window),
-  with the sample count, the span, R², and a confidence that never reads `high`
-  without about an hour of well-fitted data. A window rollover starts a fresh
-  series instead of fitting a line through the discontinuity. Not enough
-  history reports `unknown`, never a number.
-- **The decision journal.** Every tick is recorded, **including the idle ones**,
-  with the reason. On 2026-08-19 the watcher decided "do nothing" for hours and
-  nothing recorded that it had. `tui` shows a run of consecutive do-nothing
-  decisions beside the headroom that caused them.
-- **`doctor` upgraded.** It no longer treats an external switcher as a
-  dependency. It checks the account store, identifies the active account by
-  credential fingerprint (and **warns** when the live login is one rotorcc does
-  not manage, since every threshold here is about the active account), reports
-  the measured/unmeasured split, counts viable rotation targets, and names the
-  strategy in force.
-- **The rest of the surface**, natively: `accounts add`/`add-token`/`remove`/
-  `alias`/`disable`/`enable`/`swap`/`move`/`export`, `switch --strategy`,
-  `run <ref> -- cmd` for a single terminal, `map`/`unmap` for
-  directory→account bindings, `--json` on every read command, `--model`.
-
-### Fixed (production, 2026-08-18) — two defects that were specified but never coded
-
-Found while writing their regression tests. The entries below in this changelog
-described both fixes as done. **Neither was in the source**, and both were still
-reachable in the shipped code.
-
-- **A dry run raised a real `ROTATE_NOW` flag.** `store.raiseFlag` ran _before_
-  the `dryRun` branch in `rotate()`, with no TTL and no cross-check. A simulated
-  rotation could therefore tell a healthy live session hours later to stop
-  dispatching work and exit — which is what happened, at 72% headroom with
-  rotation disabled.
-
-  Now: dry runs raise nothing. Flags carry the level they were raised at and an
-  expiry (30 minutes by default). `readFlag(name, { currentLevel, nowMs })`
-  **deletes** a flag that has expired or whose level no longer holds, rather than
-  filtering it — leaving it on disk means the next reader that forgets the check
-  obeys it. The hook passes `state.lastLevel`, since a hook is the one place a
-  flag becomes an instruction to a running agent.
-
-- **A dry-run manifest could be read as a rescue record.** It was written into
-  the real manifests directory with no marker, so `latestManifest()` returned it
-  and the resume banner presented rows reading "would commit 345 file(s)" as
-  proof of work saved — while thirteen trees sat unpushed for twenty hours.
-
-  Now: `Manifest.dryRun`; simulated manifests go to `manifests/dry-run/` where no
-  resume path reaches them; the Markdown opens with a banner _before_ the title;
-  and `state.lastManifestPath` is never set from one.
-
-- Also: the hook printed `0% headroom left` whenever the figure was simply
-  absent — a number invented from a missing field, and the most alarming one
-  available. It reads `headroom unknown` now.
-
-### Fixed (production, 2026-08-19) — the defect that cost a session
-
-- **One unreadable account blinded the whole reader, and no rotation ever fired.**
-  The operator burned to 99% of their limit while the watcher ticked every 60
-  seconds and `status` printed `accounts unreadable — expected object, received
-null`. Two healthy accounts (45% and 91% headroom) were sitting right there.
-
-  Three compounding causes, all in `src/core/usage.ts`:
-  1. The switcher emits `"usage": null` for an account whose quota it could not
-     fetch — a token needing re-auth, a transient API failure, an account not yet
-     polled. The schema used `.optional()`, which accepts `undefined` and
-     **rejects `null`**.
-  2. The call site used `.parse()`, which throws on any failure, so one bad entry
-     discarded every good one.
-  3. Nothing downstream distinguished "no headroom" from "unknown headroom".
-
-  Now: `.nullish()` on every optional usage field; accounts parsed
-  **individually** with `safeParse`, so a malformed entry costs that account and
-  no other; an account with null or absent usage is reported **stale with 0%
-  headroom** — never rotated onto, never silently dropped; and any account numbers
-  that failed to parse come back on `UsageReading.unreadableAccounts` so `status`
-  and `doctor` can say so out loud. Four regression tests in
-  `test/usage-partial-read.test.ts` pin the exact production payload, including
-  the literal `"usage": null` entry.
-
-  The principle this violated: **a rotation harness that fails closed on a partial
-  read is worse than no harness — it reports confidently and does nothing.** This
-  is the third defect of that shape (both below), and the first to cost real work.
-
-### Fixed (found in production dogfood, 2026-08-18)
-
-- Routine hook events (`SubagentStop`, `Stop`, `UserPromptSubmit`) committed every
-  dirty tree with a `wip(rotorcc)` commit and pushed it. On a busy orchestrator
-  (48 trees, one perpetually-dirty from build artefacts) that meant a commit-and-
-  push every few minutes, which polluted branch history, switched the operator's
-  own checkout under them, and cancelled the project's CI run on every push. New
-  `commitDirty` option on `checkpointTree`/`performCheckpoint`: routine hooks pass
-  `false` and only push what agents already committed; `SessionEnd`, rotation and
-  crash reconstruction keep `true` — the moments uncommitted work would actually be
-  lost. Two tests pin the routine behaviour. `includeMainTree` should be `false`
-  for an orchestrator's own checkout (documented in ROTOR setup).
-- A `ROTATE_NOW` flag written by a `--dry-run` rotation survived on disk and was
-  surfaced by the `UserPromptSubmit` hook to a healthy live session hours later
-  (real level `ok`, 72% headroom, `rotation.enabled=false`) — the orchestrator was
-  told to exit on a false alarm. Fix: dry runs never write flags outside a scratch
-  dir; the hook cross-checks a flag's `raisedAt` against `state.lastLevel` and the
-  current usage read and drops a flag whose level no longer holds (logged as
-  `stale-flag-dropped`); flag files carry a TTL (default 30 min).
