@@ -39,6 +39,115 @@ First release.
 
 ## Unreleased
 
+### Added — rotorcc owns its account layer (2026-08-19)
+
+rotorcc no longer shells out to an external account switcher. It manages its own
+accounts end to end: credential storage, the switch, quota reading, the roster,
+strategies, mappings. It works on a machine with no other switcher installed.
+
+The reasoning, and the four arguments against continuing to compose, are in
+[ADR 0001](docs/adr/0001-own-the-account-layer.md). The short version: rotorcc's
+whole policy is a function of one number per account, and getting that number by
+parsing another program's stdout meant it could become unavailable for reasons
+rotorcc could not see, classify, or degrade around. That is the 2026-08-19
+outage exactly.
+
+- **Credentials.** `src/accounts/credentials.ts` reads and writes Claude Code's
+  active login across the macOS Keychain, `~/.claude/.credentials.json` and
+  `~/.claude.json`, with a per-account stash of rotorcc's own. Every write is
+  atomic with `0600` set on the descriptor before any secret exists in the file.
+  "Absent" and "unreadable" never collapse into one answer. A credential read
+  from a backend that may lag is marked degraded and is never refreshed — a
+  refresh token is one-time, and spending a superseded one yields
+  `invalid_grant`, which looks exactly like a dead account.
+- **Locking.** `src/accounts/ccLock.ts` holds Claude Code's own
+  `proper-lockfile` credential and config locks, in Claude Code's order, at its
+  60s/10s staleness. Without this, a switch landing inside Claude Code's token
+  refresh is overwritten by the refreshed _old_ account's token and the backup
+  just taken holds a spent refresh token.
+- **Quota.** `src/accounts/oauth.ts` fetches `api.anthropic.com/api/oauth/usage`
+  directly and refreshes tokens against `platform.claude.com/v1/oauth/token`.
+  These are rotorcc's only network calls, both to Anthropic, both on the
+  operator's own credential. Every field parses as nullish and every window as
+  optional, so an absent or unrecognised piece costs that piece and not the read.
+- **Cache.** Last-good windows per account **with their age**, a three-minute
+  poll floor, exponential backoff, and the server's `Retry-After` honoured. A
+  failed read never becomes a percentage.
+- **The switch.** A five-step transaction with per-step rollback, all inside the
+  locks. It captures the account being left **before** activating the new one:
+  Claude Code rotates the live refresh token whenever it likes, and the copy
+  stashed at add-time is dead the moment it does.
+- **Migration.** `rotorcc accounts import --from-cswap` reads another switcher's
+  store once, read-only, one slot at a time so a corrupt entry costs that slot
+  and no other. It never modifies the source, and does not inherit its opinion
+  of which account is active — rotorcc establishes that by fingerprinting the
+  real credential on the machine.
+
+### Added — what makes rotorcc better than a headroom-only switcher
+
+- **Rotation that knows about work in flight.** Before rotating, rotorcc looks at
+  every watched worktree. Work it _cannot_ save — protected branch, mid-rebase,
+  no remote — is a **refusal**, not a warning: rotating ends the session that
+  owns it. And a target without enough headroom to _finish_ the running work is
+  refused rather than accepted as the least bad option.
+- **`rotorcc tui` / `rotorcc watch`.** A real terminal dashboard: per-account
+  headroom with the binding window and its reset, burn prediction with
+  confidence, unsaved work per tree and whether rotorcc could save it, snapshot
+  age, watcher health, and the last N decisions with the reason each was taken
+  or refused. Pure renderer, so the honesty rule is tested rather than eyeballed.
+  Colour from the terminal's own 16 colours, `NO_COLOR` honoured, SSH-safe.
+- **`rotorcc predict`.** Least-squares burn rate per (account, quota window),
+  with the sample count, the span, R², and a confidence that never reads `high`
+  without about an hour of well-fitted data. A window rollover starts a fresh
+  series instead of fitting a line through the discontinuity. Not enough
+  history reports `unknown`, never a number.
+- **The decision journal.** Every tick is recorded, **including the idle ones**,
+  with the reason. On 2026-08-19 the watcher decided "do nothing" for hours and
+  nothing recorded that it had. `tui` shows a run of consecutive do-nothing
+  decisions beside the headroom that caused them.
+- **`doctor` upgraded.** It no longer treats an external switcher as a
+  dependency. It checks the account store, identifies the active account by
+  credential fingerprint (and **warns** when the live login is one rotorcc does
+  not manage, since every threshold here is about the active account), reports
+  the measured/unmeasured split, counts viable rotation targets, and names the
+  strategy in force.
+- **The rest of the surface**, natively: `accounts add`/`add-token`/`remove`/
+  `alias`/`disable`/`enable`/`swap`/`move`/`export`, `switch --strategy`,
+  `run <ref> -- cmd` for a single terminal, `map`/`unmap` for
+  directory→account bindings, `--json` on every read command, `--model`.
+
+### Fixed (production, 2026-08-18) — two defects that were specified but never coded
+
+Found while writing their regression tests. The entries below in this changelog
+described both fixes as done. **Neither was in the source**, and both were still
+reachable in the shipped code.
+
+- **A dry run raised a real `ROTATE_NOW` flag.** `store.raiseFlag` ran _before_
+  the `dryRun` branch in `rotate()`, with no TTL and no cross-check. A simulated
+  rotation could therefore tell a healthy live session hours later to stop
+  dispatching work and exit — which is what happened, at 72% headroom with
+  rotation disabled.
+
+  Now: dry runs raise nothing. Flags carry the level they were raised at and an
+  expiry (30 minutes by default). `readFlag(name, { currentLevel, nowMs })`
+  **deletes** a flag that has expired or whose level no longer holds, rather than
+  filtering it — leaving it on disk means the next reader that forgets the check
+  obeys it. The hook passes `state.lastLevel`, since a hook is the one place a
+  flag becomes an instruction to a running agent.
+
+- **A dry-run manifest could be read as a rescue record.** It was written into
+  the real manifests directory with no marker, so `latestManifest()` returned it
+  and the resume banner presented rows reading "would commit 345 file(s)" as
+  proof of work saved — while thirteen trees sat unpushed for twenty hours.
+
+  Now: `Manifest.dryRun`; simulated manifests go to `manifests/dry-run/` where no
+  resume path reaches them; the Markdown opens with a banner _before_ the title;
+  and `state.lastManifestPath` is never set from one.
+
+- Also: the hook printed `0% headroom left` whenever the figure was simply
+  absent — a number invented from a missing field, and the most alarming one
+  available. It reads `headroom unknown` now.
+
 ### Fixed (production, 2026-08-19) — the defect that cost a session
 
 - **One unreadable account blinded the whole reader, and no rotation ever fired.**
