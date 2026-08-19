@@ -235,7 +235,15 @@ export async function switchAccount(options: SwitchOptions): Promise<SwitchResul
             return { failure: err instanceof Error ? err : new Error(String(err)) };
           }
         },
-        { ...(options.lockTimeoutMs !== undefined ? { timeoutMs: options.lockTimeoutMs } : {}) },
+        // `env` has to reach BOTH locks. Without it the config lock resolves
+        // against the real process environment while the credential lock uses
+        // the caller's, which means a test — or a `rotorcc run` with a
+        // redirected CLAUDE_CONFIG_DIR — takes a lock in one home directory
+        // and mutates files in another.
+        {
+          ...(options.lockTimeoutMs !== undefined ? { timeoutMs: options.lockTimeoutMs } : {}),
+          ...(options.env !== undefined ? { env: options.env } : {}),
+        },
       ),
     {
       ...(options.lockTimeoutMs !== undefined ? { timeoutMs: options.lockTimeoutMs } : {}),
