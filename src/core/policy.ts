@@ -274,23 +274,47 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
   // The weekly window is spent. Is there anywhere to go?
   if (candidates.length === 0) {
     const activeLabel = active.alias ?? active.email ?? `slot ${active.number}`;
+    const roster = [
+      {
+        slot: active.number,
+        label: activeLabel,
+        headroomPct: activeWeekly.pct,
+        window: activeWeekly.window,
+        resetsAt: active.bindingResetsAt ?? null,
+        why: 'the account in use',
+      },
+      ...rejected,
+    ];
+
+    // "Every account is spent" and "I could not measure some of them" are
+    // different statements, and only the first justifies declaring the machine
+    // finished. An account rotorcc could not read might be sitting at 90% — the
+    // 2026-08-19 outage was exactly this shape, where an unreadable account was
+    // treated as a fact about quota rather than a fact about the reader.
+    //
+    // So: stop ONLY when every alternative was measured and every measurement
+    // was spent. When any of them is merely unknown, say that instead.
+    const unmeasured = rejected.filter((r) => r.headroomPct === null && r.window === 'unknown');
+    if (unmeasured.length > 0) {
+      return {
+        kind: 'checkpoint',
+        reason:
+          `the weekly window is down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% and rotorcc could ` +
+          `not measure ${unmeasured.length} of the other account(s) ` +
+          `(${unmeasured.map((u) => `slot ${u.slot}: ${u.why}`).join('; ')}). ` +
+          'It will NOT declare the machine out of quota on a reading it does not have, and it ' +
+          'will not hand over to an account it cannot see. Everything has been checkpointed; ' +
+          'run "rotorcc accounts --force" to retry the read.',
+      };
+    }
+
     return {
       kind: 'stop',
       reason:
         `every account is at or below ${config.weeklyRotatePct}% weekly headroom. rotorcc is ` +
         'NOT rotating and NOT starting anything. Work already committed and pushed is safe; ' +
         'this needs a human.',
-      accounts: [
-        {
-          slot: active.number,
-          label: activeLabel,
-          headroomPct: activeWeekly.pct,
-          window: activeWeekly.window,
-          resetsAt: active.bindingResetsAt ?? null,
-          why: 'the account in use',
-        },
-        ...rejected,
-      ],
+      accounts: roster,
     };
   }
 

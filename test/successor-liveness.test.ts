@@ -41,6 +41,24 @@ describe('launchSuccessor — liveness gate', () => {
     expect(result.detail).toMatch(/still alive|two operators/i);
   });
 
+  it('REFUSES when the caller did not say whether the predecessor is alive', async () => {
+    // The gate fails CLOSED. "Nobody told me" is not evidence of death, and a
+    // safety check a new call site can bypass by forgetting a field is not a
+    // safety check — which is exactly how the original defect reached
+    // production. An explicit `false` is required to launch.
+    const result = await launchSuccessor({
+      config,
+      logger: silentLogger(),
+      cwd: '/tmp/x',
+      prompt: 'resume',
+      dryRun: false,
+      // predecessorAlive deliberately omitted
+    });
+    expect(result.ok).toBe(false);
+    expect(result.warnings).toContain('successor-refused-predecessor-alive');
+    expect(result.detail).toMatch(/did not establish/i);
+  });
+
   it('refuses BEFORE choosing a launcher — the gate is unconditional', async () => {
     // Even with an unknown launcher, a live predecessor must short-circuit to a
     // refusal, never fall through to a launch attempt.

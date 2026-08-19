@@ -375,10 +375,20 @@ async function rotate(
   // successor replaces a DEAD session; if this operator is still alive, launching
   // beside it puts two operators on one worktree. This is the fact that must gate
   // the launch, and it is taken fresh here so no stale decision can bypass it.
-  const predecessorLiveness = await checkLiveness(
-    config,
-    newestSessionAcrossProjects(config)?.transcriptPath ?? '',
-  );
+  //
+  // The session checked is the one this rotation was decided FOR, carried down
+  // from the top of the tick — not a fresh `newestSessionAcrossProjects()`. On a
+  // machine with several worktrees those can be different sessions, and
+  // confirming that some other session is dead is not evidence about this one.
+  //
+  // When there is no session to check at all, `predecessorAlive` stays
+  // undefined and the gate in `launchSuccessor` refuses. An absent session is
+  // not a dead one; it is an unanswered question.
+  const predecessorTranscript = session?.transcriptPath;
+  const predecessorAlive =
+    predecessorTranscript === undefined || predecessorTranscript === ''
+      ? undefined
+      : !(await checkLiveness(config, predecessorTranscript)).dead;
   const launch = await launchSuccessor({
     config,
     logger,
@@ -386,7 +396,7 @@ async function rotate(
     prompt,
     dryRun: ctx.dryRun,
     preferTarget: predecessor ?? undefined,
-    predecessorAlive: !predecessorLiveness.dead,
+    ...(predecessorAlive === undefined ? {} : { predecessorAlive }),
   });
   logger.info('successor launch', {
     ok: launch.ok,

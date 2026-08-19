@@ -46,7 +46,9 @@ describe('PendingSwitchStore', () => {
   it('round-trips an intent and fills in an expiry', () => {
     withStore((store) => {
       store.record(base);
-      const pending = store.peek();
+      // An explicit clock: `peek` now hides an expired intent, so a test
+      // using a fixed past `decidedAt` must say when it is asking.
+      const pending = store.peek(Date.parse('2026-08-19T12:05:00Z'));
       expect(pending?.slot).toBe(3);
       expect(pending?.reason).toContain('weekly window');
       // There is no way to record an intent that lives forever: the default is
@@ -83,7 +85,7 @@ describe('PendingSwitchStore', () => {
     withStore((store) => {
       store.record({ ...base, dryRun: true });
       // Visible for inspection...
-      expect(store.peek()?.dryRun).toBe(true);
+      expect(store.peek(Date.parse('2026-08-19T12:05:00Z'))?.dryRun).toBe(true);
       // ...but never actionable. A simulation cannot decide which account a
       // real session opens on.
       expect(store.consume(Date.parse('2026-08-19T12:01:00Z'))).toBeNull();
@@ -94,7 +96,7 @@ describe('PendingSwitchStore', () => {
     withStore((store) => {
       store.record(base);
       store.record({ ...base, slot: 7, reason: 'a newer reading' });
-      expect(store.peek()?.slot).toBe(7);
+      expect(store.peek(Date.parse('2026-08-19T12:05:00Z'))?.slot).toBe(7);
       expect(store.consume(Date.parse('2026-08-19T12:01:00Z'))?.slot).toBe(7);
       expect(store.consume(Date.parse('2026-08-19T12:02:00Z'))).toBeNull();
     });
@@ -105,6 +107,20 @@ describe('PendingSwitchStore', () => {
       // Derived state: losing it costs one handover, which the next tick
       // re-derives. Refusing to start a session over it would be far worse.
       expect(store.peek()).toBeNull();
+    });
+  });
+
+  it('peek() hides an expired intent, so no screen announces one that will not happen', () => {
+    withStore((store) => {
+      store.record(base);
+      const wellPast = Date.parse(base.decidedAt) + PENDING_TTL_MS + 1000;
+      // A dashboard saying "next session opens on slot 3" for an intent that
+      // `consume` will discard unread is confident-but-false reporting, and it
+      // is worse than saying nothing because the operator plans around it.
+      expect(store.peek(wellPast)).toBeNull();
+      // The bytes are still there for diagnostics; only the read that surfaces
+      // to a human is filtered.
+      expect(store.raw()?.slot).toBe(3);
     });
   });
 

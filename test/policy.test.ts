@@ -232,7 +232,35 @@ describe('rule 2 — handover chooses by weekly headroom', () => {
       config,
       sessionAlive: true,
     });
-    // Unknown is not a candidate, so there is nowhere to go: STOP.
+    // Unknown is not a candidate, so no handover.
+    expect(action.kind).not.toBe('handover');
+  });
+
+  it('does NOT declare the machine exhausted when the alternatives were merely unread', () => {
+    const action = evaluatePolicy({
+      reading: reading([account(1, { fiveHour: 50, sevenDay: 2 }), unmeasured(2, 'http-429')]),
+      config,
+      sessionAlive: true,
+    });
+    // "Every account is spent" and "I could not measure some of them" are
+    // different statements, and only the first justifies declaring the machine
+    // finished. An account rotorcc could not read might be sitting at 90% —
+    // the 2026-08-19 outage was exactly this shape, an unreadable account
+    // treated as a fact about quota rather than a fact about the reader.
+    expect(action.kind).toBe('checkpoint');
+    expect(action.kind === 'checkpoint' && action.reason).toContain('could not measure');
+    expect(action.kind === 'checkpoint' && action.reason).toContain('http-429');
+  });
+
+  it('DOES stop when every alternative was measured and every one is spent', () => {
+    const action = evaluatePolicy({
+      reading: reading([
+        account(1, { fiveHour: 50, sevenDay: 2 }),
+        account(2, { fiveHour: 90, sevenDay: 3 }),
+      ]),
+      config,
+      sessionAlive: true,
+    });
     expect(action.kind).toBe('stop');
   });
 
@@ -295,13 +323,33 @@ describe('rule 3 — when everything is spent, STOP', () => {
   });
 
   it('distinguishes an unmeasured account from an empty one in the notice', () => {
+    // Reached via a disabled account rather than an unmeasured one, because an
+    // unmeasured alternative now prevents the stop entirely (see above). The
+    // notice still has to render an unknown headroom honestly when one appears
+    // in it — the ACTIVE account's own figure can be unknown, for one.
     const action = evaluatePolicy({
-      reading: reading([account(1, { fiveHour: 40, sevenDay: 3 }), unmeasured(2, 'http-429')]),
+      reading: reading([
+        account(1, { fiveHour: 40, sevenDay: 3 }),
+        account(2, { fiveHour: 90, sevenDay: 90 }, { disabled: true }),
+      ]),
       config,
       sessionAlive: true,
     });
     if (action.kind !== 'stop') throw new Error('expected stop');
-    const notice = renderStopNotice(action);
+    const notice = renderStopNotice({
+      ...action,
+      accounts: [
+        ...action.accounts,
+        {
+          slot: 9,
+          label: 'unread',
+          headroomPct: null,
+          window: 'unknown',
+          resetsAt: null,
+          why: 'http-429',
+        },
+      ],
+    });
     // "we could not read this" and "this is empty" mean different things, and
     // only one of them means waiting will help.
     expect(notice).toContain('unknown');

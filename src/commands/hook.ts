@@ -184,6 +184,31 @@ async function applyPendingSwitch(
   const intent = pending.consume();
   if (intent === null) return null;
 
+  /**
+   * Put the intent back when the switch did not happen for a reason that might
+   * not hold next time.
+   *
+   * `consume()` deletes before the attempt, which is what makes acting on it
+   * twice impossible — but it also means a lock timeout or a transient
+   * filesystem error would silently discard a handover that was still wanted,
+   * and the operator would keep starting sessions on the exhausted account with
+   * nothing explaining why.
+   *
+   * Re-recorded with the ORIGINAL `decidedAt`, so the expiry does not creep
+   * forward on every retry. An intent that has genuinely gone stale still dies.
+   */
+  const restore = (): void => {
+    pending.record({
+      slot: intent.slot,
+      reason: intent.reason,
+      decidedAt: intent.decidedAt,
+      expiresAt: intent.expiresAt,
+      fromHeadroomPct: intent.fromHeadroomPct,
+      window: intent.window,
+      dryRun: intent.dryRun,
+    });
+  };
+
   try {
     const manager = managerFor(config);
     if (!manager.hasAccounts()) return null;
@@ -211,8 +236,15 @@ async function applyPendingSwitch(
     for (const warning of result.warnings) logger.warn(`handover: ${warning}`);
 
     if (!result.ok) {
+      // A failed switch that was rolled back leaves the machine where it was,
+      // so the intent is still valid and worth another try at the next start.
+      // A failure that could NOT be rolled back is a different matter: the
+      // machine may already be on the target, and re-queuing would send the
+      // next session somewhere it has possibly already been.
+      if (result.rolledBack !== false) restore();
       logger.error('pending handover failed; this session keeps the previous account', {
         detail: result.detail,
+        requeued: result.rolledBack !== false,
       });
       return `rotorcc: could not switch account for this session — ${result.detail}`;
     }
@@ -226,7 +258,12 @@ async function applyPendingSwitch(
       '(switched before the session started, so nothing was interrupted)'
     );
   } catch (err) {
-    logger.error('pending handover threw', { detail: String(err).slice(0, 200) });
+    // Nothing here established that the switch happened, so the intent is still
+    // wanted. Put it back rather than losing it to an exception.
+    restore();
+    logger.error('pending handover threw; re-queued for the next session', {
+      detail: String(err).slice(0, 200),
+    });
     return null;
   }
 }

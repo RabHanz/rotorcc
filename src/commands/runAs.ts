@@ -118,10 +118,18 @@ export async function runAsAccount(options: RunAsOptions): Promise<number> {
       /* nothing further to try; the message below is the report */
     }
   };
+  // The child is in the same foreground process group, so it receives the
+  // signal directly and independently of us. Deleting its config directory the
+  // instant we get ours would pull the credential out from under a process that
+  // is still shutting down — and Claude Code writes on exit.
+  //
+  // So the signal handler does NOT clean up. It records that we are going, and
+  // lets the normal path — which waits for the child's `close` event — do the
+  // removal. The `exit` handler is the backstop for the case where the process
+  // really does die immediately.
+  let signalled: NodeJS.Signals | null = null;
   const onSignal = (signal: NodeJS.Signals): void => {
-    removeHome();
-    process.removeListener('exit', removeHome);
-    process.kill(process.pid, signal);
+    signalled = signal;
   };
   process.on('exit', removeHome);
   process.once('SIGINT', onSignal);
@@ -181,6 +189,12 @@ export async function runAsAccount(options: RunAsOptions): Promise<number> {
       if (existsSync(home)) {
         out(`warning: could not remove ${home}, which holds a credential. Delete it by hand.`);
       }
+    }
+    // Re-raise with the default disposition once the child is gone and the
+    // credential is off disk, so a caller still sees the conventional
+    // 128+signal status rather than a plain 0.
+    if (signalled !== null) {
+      process.kill(process.pid, signalled);
     }
   }
 }

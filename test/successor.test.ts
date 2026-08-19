@@ -113,6 +113,7 @@ describe('launchSuccessor', () => {
       cwd: join(root, 'project'),
       prompt: 'rotorcc resume: read the manifest',
       dryRun: false,
+      predecessorAlive: false,
       preferTarget: 'charlie:2',
     });
 
@@ -132,6 +133,7 @@ describe('launchSuccessor', () => {
       cwd: join(root, 'project'),
       prompt: 'p',
       dryRun: true,
+      predecessorAlive: false,
     });
     expect(result.ok).toBe(true);
     expect(result.detail).toContain('dry run');
@@ -158,6 +160,7 @@ process.exit(0);
       cwd: join(root, 'project'),
       prompt: 'p',
       dryRun: false,
+      predecessorAlive: false,
     });
     expect(result.warnings.join(' ')).toContain('trusted');
     expect(result.promptConfirmed).toBe(false);
@@ -185,6 +188,7 @@ process.exit(0);
       cwd: join(root, 'project'),
       prompt: 'p',
       dryRun: false,
+      predecessorAlive: false,
     });
     expect(result.warnings.join(' ')).toContain('no previous conversation');
   });
@@ -200,6 +204,7 @@ process.exit(0);
       cwd: root,
       prompt: 'p',
       dryRun: false,
+      predecessorAlive: false,
     });
     expect(result.ok).toBe(true);
     expect(result.launcher).toBe('none');

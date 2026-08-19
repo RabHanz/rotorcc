@@ -86,8 +86,27 @@ export class PendingSwitchStore {
     });
   }
 
-  /** Read without consuming. For `status`, the TUI and `doctor`. */
-  peek(): PendingSwitch | null {
+  /**
+   * Read without consuming. For `status`, the TUI and `doctor`.
+   *
+   * An EXPIRED intent reads as absent, exactly as it does for `consume`. A
+   * dashboard announcing "next session opens on slot 3" for an intent that will
+   * in fact be discarded unread is the confident-but-false reporting this whole
+   * project exists to not do — and it is worse than saying nothing, because the
+   * operator plans around it.
+   *
+   * `raw()` is there for the one caller that genuinely wants the bytes on disk.
+   */
+  peek(nowMs = Date.now()): PendingSwitch | null {
+    const pending = this.raw();
+    if (pending === null) return null;
+    const expires = Date.parse(pending.expiresAt);
+    if (!Number.isNaN(expires) && nowMs >= expires) return null;
+    return pending;
+  }
+
+  /** The file as it stands, expiry and all. Diagnostics only. */
+  raw(): PendingSwitch | null {
     if (!existsSync(this.path)) return null;
     try {
       const parsed = pendingSchema.safeParse(JSON.parse(readFileSync(this.path, 'utf8')));
@@ -106,7 +125,7 @@ export class PendingSwitchStore {
    * the reason available via `peek` beforehand if a caller wants to log it.
    */
   consume(nowMs = Date.now()): PendingSwitch | null {
-    const pending = this.peek();
+    const pending = this.raw();
     this.clear();
     if (pending === null) return null;
     if (pending.dryRun) return null;

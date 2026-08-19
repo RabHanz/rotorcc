@@ -1,0 +1,103 @@
+{
+  "status": "reviewed",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/accounts/credentials.ts",
+      "line": 558,
+      "summary": "The 'previous credential' cushion file is now written as base64 of the plaintext secret, but nothing in this diff shows the corresponding read/restore path being updated to decode it.",
+      "failure_scenario": "writeStash() runs, finds an existing stash via readStash(), and writes Buffer.from(existing.value,'utf8').toString('base64') to stashPreviousPath() instead of the raw plaintext that the old code wrote via readFileSync(path,'utf8'). Whatever downstream code restores from this cushion (recovery after a corrupted current stash, or a 'roll back to previous generation' command) previously expected plain JSON credential text; fed base64 text instead it either fails to parse or silently treats the base64 blob as a credential, so the one safety net this feature exists for is broken exactly when it's needed."
+    },
+    {
+      "severity": "P1",
+      "file": "src/commands/hook.ts",
+      "line": 184,
+      "summary": "PendingSwitchStore.consume() deletes the queued handover before switchAccount() is even attempted, so any failure (result.ok===false, or an exception caught by the outer try/catch) permanently discards the intent with no retry.",
+      "failure_scenario": "The daemon detects the active account's weekly quota is low, records a handover to slot 2, and arms policyLatch for that window. The next SessionStart hook fires applyPendingSwitch(), which calls pending.consume() up front \u2014 deleting next-session-account.json immediately. switchAccount() then hits a transient failure (lock timeout, a momentarily unreadable roster file). The session starts on the old, near-exhausted account and the operator sees an error message, but the pending-switch file is already gone. Because applySessionPolicy()'s 'handover' branch checks policyLatch and treats a same-window handover as 'already queued' (skipping pending.record() again), no new intent is ever recorded until the weekly window itself rolls over \u2014 the operator is silently stuck on the exhausted account for up to a week with no automatic remediation."
+    },
+    {
+      "severity": "P1",
+      "file": "src/core/policy.ts",
+      "line": 214,
+      "summary": "evaluatePolicy() rejects a candidate account whose weekly headroom is simply unmeasured with the same 'not eligible' outcome as one that is confirmed exhausted, so if every other account happens to be unmeasured the policy declares total exhaustion and raises FLAG_ALL_EXHAUSTED / stops the system.",
+      "failure_scenario": "Operator has 3 accounts. The active one drops below weeklyRotatePct. The other two accounts' latest quota poll failed (rate limited, network blip, or they were just added and never successfully polled), so headroomIsKnown() is false for both. Both get pushed to `rejected` with why:'not measured' and neither enters `candidates`. candidates.length === 0 triggers the 'stop' branch: rotorcc writes FLAG_ALL_EXHAUSTED, prints 'every account is out of weekly quota... this needs a human', and halts all rotation/handover \u2014 even though the two other accounts might have plenty of headroom and simply weren't measured yet."
+    },
+    {
+      "severity": "P1",
+      "file": "src/commands/runAs.ts",
+      "line": 121,
+      "summary": "The new SIGINT/SIGTERM/SIGHUP handler deletes the isolated HOME (and its plaintext credential) synchronously on receipt of the first signal, without waiting for the spawned `claude` child \u2014 which receives the same signal directly via the shared foreground process group \u2014 to actually exit.",
+      "failure_scenario": "User runs `rotorcc run --account 2 -- claude` and starts a long agentic task, then presses Ctrl-C once. The terminal delivers SIGINT to the whole process group, hitting both rotorcc's node process and the child `claude` process. Claude Code's CLI intercepts the first SIGINT to show a 'press Ctrl-C again to exit' confirmation and keeps running. rotorcc's onSignal handler, however, immediately calls removeHome() (rmSync on the temp HOME holding .credentials.json) and re-raises the signal to kill itself. The still-running `claude` child now has its credential file and config directory yanked out from under it mid-session, breaking it even though the user only meant to interrupt, not confirm, an exit \u2014 directly undermining the tool's stated purpose of not losing long-agent-session work."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/daemon.ts",
+      "line": 380,
+      "summary": "The final pre-launch liveness guard re-queries newestSessionAcrossProjects(config) instead of reusing the specific predecessor session that detectHardKill identified earlier in the same tick, so in a multi-worktree setup it can check a different session's liveness than the one actually being replaced.",
+      "failure_scenario": "Two lanes/worktrees are being watched. Lane A's session is genuinely dead (detectHardKill correctly flags kill!==null using its own newestSessionAcrossProjects() read). Between that check and rotate()'s later checkLiveness() call, a human manually starts (or resumes) a session in lane B, making lane B the 'newest' session across projects. rotate()'s fresh checkLiveness() call now evaluates lane B (alive) instead of lane A (dead), sets predecessorAlive=true, and launchSuccessor() refuses \u2014 so lane A's genuinely dead session never gets a successor, and nothing surfaces this beyond a log line, leaving that lane's work stalled until a human notices."
+    },
+    {
+      "severity": "P2",
+      "file": "src/accounts/manager.ts",
+      "line": 165,
+      "summary": "The new per-account error fallback sets headroomPct: 0 (paired with headroomKnown: false) for any account whose read threw, relying on every consumer to check the boolean flag rather than the numeric value before using it \u2014 including the burn-rate sampler, which iterates every account in usage.accounts unconditionally.",
+      "failure_scenario": "A credential write leaves one account's config briefly unparseable; readOne() throws for that slot and the catch block pushes an AccountReading with headroomPct:0, headroomKnown:false into `accounts`. Later in the same tick, `for (const account of usage.accounts) burn.record(account);` runs over every account with no visible headroomKnown filter at that call site \u2014 if BurnStore.record() doesn't itself gate on headroomIsKnown, a 0% sample lands in the burn-rate history for that account, exactly the 'cliff in the series' the adjacent comment says must never happen, and a later real reading makes it look like a burn-rate crash."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/successor.ts",
+      "line": 274,
+      "summary": "The predecessor-alive safety guard only fires when predecessorAlive is exactly true; any caller that omits the field (undefined) silently bypasses the check and falls back to the old, unsafe launch-regardless behavior, contradicting the comment's claim that the pairing is now 'impossible.'",
+      "failure_scenario": "A future or existing call site invokes launchSuccessor() without computing predecessorAlive (easy to do since the field is optional and typechecks fine without it). If that predecessor is in fact still alive, `ctx.predecessorAlive === true` evaluates false (it's undefined), the guard does not trigger, and a successor is launched beside a live session \u2014 reproducing the exact two-sessions-one-worktree corruption this diff was written to prevent, just via a call site the guard doesn't cover."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/accounts.ts",
+      "line": 440,
+      "summary": "ctx.manager.roster.update(...) is called outside the try/catch that guards the credential-duplication step, so a throw there leaves duplicated stash/identity files on disk without rollback and without the 'swap failed and was undone' message ever being shown.",
+      "failure_scenario": "swapAccounts() successfully writes and verifies both duplicated credential copies, exits the try block, then calls ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot)) \u2014 which throws (e.g., the roster file was concurrently modified or fails its own validation). The exception propagates uncaught past the deliberate rollback logic; the newly-written duplicate stash/identity files for both slots are left on disk, the roster was never updated, and the operator gets an unhandled rejection instead of either a successful-swap confirmation or the intended 'swap failed and was undone' message."
+    },
+    {
+      "severity": "P2",
+      "file": "src/accounts/switch.ts",
+      "line": 217,
+      "summary": "When there is no previous live credential to restore, the code pushes an undo entry whose run() unconditionally throws; if the surrounding rollback loop (not shown in this diff) doesn't isolate each step's errors, this can abort earlier rollback steps still pending in the reversed undo stack.",
+      "failure_scenario": "An operator with no live Claude Code login runs switchAccount, which activates the target credential (activated=true, and the 'no previous credential' undo entry that always throws is pushed) and then fails at a later step (e.g., writing the identity block). If the rollback executor runs undo entries in reverse order without a per-entry try/catch, reaching this entry throws and stops the loop, so any undo steps registered before the credential write (earlier on the stack, later in reverse order) never execute, leaving partially-undone state instead of the clean rollback the mechanism is supposed to guarantee."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/status.ts",
+      "line": 160,
+      "summary": "pendingHandover is populated via PendingSwitchStore.peek(), which never checks expiresAt, so status/dashboard continues reporting 'next session opens on slot N' even after the intent has passed its 6-hour TTL and will be silently discarded (not applied) the next time consume() runs.",
+      "failure_scenario": "A handover to slot 2 is queued at 09:00 with a 6-hour TTL (15:00 expiry). The operator checks `rotorcc status` at 14:00 and sees 'next session opens on slot 2' with no indication it's about to lapse. They don't start a new session until 16:00; SessionStart's applyPendingSwitch() calls consume(), which deletes the file and returns null because nowMs >= expires, so the session silently opens on the original (still-exhausted) account. status.ts and tui/model.ts both use the same unchecked peek(), so the same misleading 'will switch' message shows on the TUI dashboard too."
+    }
+  ],
+  "blocking": true,
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "note": "Codex subscription ended; per docs/operations/BLIND-CRITIC-FALLBACK.md a fresh context received ONLY the source diff plus the review contract \u2014 no plan, no reasoning, no test results, no authorship. Weaker independence than a different vendor, and the record says so.",
+  "base": "62de04e",
+  "scope": "src/ only; second pass covering the handover redesign and the first pass's fixes",
+  "triage": {
+    "accepted": 7,
+    "refuted": 3,
+    "refutations": [
+      {
+        "file": "src/accounts/credentials.ts",
+        "claim": ".prev cushion written base64 but the read path was not updated",
+        "evidence": "readPreviousStash() at credentials.ts:591 already decodes base64. The critic saw only the diff, which does not contain that function."
+      },
+      {
+        "file": "src/accounts/manager.ts",
+        "claim": "the burn sampler uses headroomPct without checking headroomKnown",
+        "evidence": "BurnStore.record() at burn.ts:97 opens with \"if (!headroomIsKnown(account)) return;\" \u2014 an unmeasured account records nothing at all."
+      },
+      {
+        "file": "src/accounts/switch.ts",
+        "claim": "a throwing undo entry could abort earlier rollback steps",
+        "evidence": "the rollback loop at switch.ts:313 wraps each entry.run() in its own try/catch and records the failure as a warning. The critic hedged this finding explicitly on not being shown the loop."
+      }
+    ]
+  },
+  "blockingResolved": true
+}

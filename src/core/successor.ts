@@ -39,6 +39,14 @@ export interface LaunchContext {
    * but the daemon must always set it from a live liveness check taken at launch
    * time, not from a stale earlier reading.
    */
+  /**
+   * Whether the session this successor would replace is still running.
+   *
+   * Must be set to an explicit `false` for a launch to proceed. Optional in the
+   * type only so existing callers still compile; the gate treats `undefined` as
+   * "not established" and refuses, because a safety check that a caller can
+   * bypass by forgetting a field is not a safety check.
+   */
   predecessorAlive?: boolean;
 }
 
@@ -271,13 +279,21 @@ export async function launchSuccessor(ctx: LaunchContext): Promise<LaunchResult>
   // The two facts — "predecessor alive" and "launch a successor" — are mutually
   // exclusive and are now enforced here so no upstream logic error can produce
   // the pair again.
-  if (ctx.predecessorAlive === true) {
+  // `!== false`, not `=== true`. A safety gate must fail CLOSED: a caller that
+  // omits the field has not established that the predecessor is dead, and
+  // "nobody told me" is not evidence of death. Requiring an explicit `false`
+  // means a new call site cannot bypass this by forgetting about it, which is
+  // precisely how the original defect reached production.
+  if (ctx.predecessorAlive !== false) {
     return {
       ok: false,
       launcher: ctx.config.successor.launcher,
       detail:
-        'refused: the predecessor session is still alive. A successor replaces a dead ' +
-        'session; launching one beside a live session would put two operators on one worktree.',
+        ctx.predecessorAlive === undefined
+          ? 'refused: the caller did not establish that the predecessor is dead. A successor ' +
+            'replaces a dead session, and this gate fails closed rather than assuming.'
+          : 'refused: the predecessor session is still alive. A successor replaces a dead ' +
+            'session; launching one beside a live session would put two operators on one worktree.',
       handle: null,
       promptConfirmed: false,
       warnings: ['successor-refused-predecessor-alive'],

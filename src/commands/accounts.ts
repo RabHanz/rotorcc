@@ -448,7 +448,20 @@ export async function swapAccounts(
     return 1;
   }
 
-  ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot));
+  try {
+    ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot));
+  } catch (err) {
+    // Inside the guard too. A roster write can legitimately fail — it refuses a
+    // torn file rather than overwriting it — and leaving the duplicated stashes
+    // behind would put a credential at a (slot, email) the roster has never
+    // heard of, which nothing would ever reference or clean up.
+    await ctx.manager.credentials.deleteStash(b.slot, a.email);
+    await ctx.manager.credentials.deleteStash(a.slot, b.email);
+    ctx.manager.credentials.deleteAccountIdentity(b.slot, a.email);
+    ctx.manager.credentials.deleteAccountIdentity(a.slot, b.email);
+    ctx.out(`swap failed and was undone: ${(err as Error).message.slice(0, 160)}`);
+    return 1;
+  }
 
   // Only now are the originals redundant. A failure past this point leaves a
   // stale copy at the old key, which is untidy but harmless — the roster no
