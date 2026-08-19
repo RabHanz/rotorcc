@@ -27,6 +27,7 @@ import {
   decideHardKill,
 } from './decide.js';
 import { PendingSwitchStore } from './nextSession.js';
+import { hotSwapAccount } from './hotswap.js';
 import { evaluatePolicy, renderStopNotice, weeklyHeadroom } from './policy.js';
 import {
   performCheckpoint,
@@ -377,6 +378,54 @@ async function rotate(
   // handing them a document whose every row says "would commit" is how a
   // simulation gets presented as a rescue.
   effects.manifestPath = ctx.dryRun ? null : checkpoint.manifestPath;
+
+  // ---------------------------------------------------------------------
+  // Hot swap: move the LIVE session to the new account and let it carry on.
+  //
+  // Only when the session is actually alive — `hardKill !== null` means the
+  // process is gone, and there is nothing to swap under. Everything below this
+  // block is the successor path, which is reached when hot-swap is disabled,
+  // not applicable, or tried and shown to have failed.
+  //
+  // See docs/adr/0003-live-credential-hot-swap.md.
+  // ---------------------------------------------------------------------
+  const mode = config.rotation.mode;
+  const canHotSwap = mode !== 'successor' && hardKill === null && session !== null;
+  if (canHotSwap) {
+    const swap = await hotSwapAccount({
+      config,
+      logger,
+      targetSlot: action.targetAccount,
+      transcriptPath: session?.transcriptPath,
+      dryRun: ctx.dryRun,
+    });
+    logger.info('hot swap', { verdict: swap.verdict, detail: swap.detail });
+
+    if (swap.verdict !== 'failed') {
+      // Done. No ROTATE_NOW — that flag tells an agent to wrap up and hand over
+      // to a replacement, and there is no replacement: it is still the same
+      // session, on a different account, mid-task.
+      taken.push(
+        ctx.dryRun ? `dry-run-hotswap:${action.targetAccount}` : `hotswap:${action.targetAccount}`,
+      );
+      taken.push(`hotswap-${swap.verdict}`);
+      return taken;
+    }
+
+    if (mode === 'hotswap') {
+      // The operator asked for hot-swap and nothing else. Falling back to a
+      // successor here would replace a session they told rotorcc not to touch.
+      logger.error('hot swap failed and rotation.mode is "hotswap"; not launching a successor', {
+        detail: swap.detail,
+      });
+      taken.push('hotswap-failed');
+      return taken;
+    }
+
+    logger.warn('hot swap failed; falling back to the successor path', { detail: swap.detail });
+    taken.push('hotswap-failed');
+    taken.push('fallback:successor');
+  }
 
   // A dry run does not raise a live flag. On 2026-08-18 one that did was read
   // by the UserPromptSubmit hook hours later, on a healthy session with 72%
