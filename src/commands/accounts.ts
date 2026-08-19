@@ -403,18 +403,61 @@ export async function swapAccounts(
   const identityA = ctx.manager.credentials.readAccountIdentity(a.slot, a.email);
   const identityB = ctx.manager.credentials.readAccountIdentity(b.slot, b.email);
 
-  if (stashA.kind === 'found')
-    await ctx.manager.credentials.writeStash(b.slot, a.email, stashA.value);
-  if (stashB.kind === 'found')
-    await ctx.manager.credentials.writeStash(a.slot, b.email, stashB.value);
-  if (identityA !== null) ctx.manager.credentials.writeAccountIdentity(b.slot, a.email, identityA);
-  if (identityB !== null) ctx.manager.credentials.writeAccountIdentity(a.slot, b.email, identityB);
+  // Ordered so that no failure can lose a credential.
+  //
+  // Write BOTH new copies first and verify them; only then update the roster;
+  // only then delete the old copies. At every instant in that sequence the
+  // credential exists in at least one place the roster or this function can
+  // still find, so the worst outcome is a duplicate — which the cleanup below,
+  // or a later swap, removes — rather than a slot whose bytes are gone.
+  //
+  // Doing the deletes before the roster write, as this used to, meant a throw
+  // in the middle left a stash file at a (slot, email) the roster had never
+  // heard of and nothing would ever reference or clean up again.
+  try {
+    if (stashA.kind === 'found') {
+      await ctx.manager.credentials.writeStash(b.slot, a.email, stashA.value);
+    }
+    if (stashB.kind === 'found') {
+      await ctx.manager.credentials.writeStash(a.slot, b.email, stashB.value);
+    }
+    if (identityA !== null)
+      ctx.manager.credentials.writeAccountIdentity(b.slot, a.email, identityA);
+    if (identityB !== null)
+      ctx.manager.credentials.writeAccountIdentity(a.slot, b.email, identityB);
+
+    // Verify before committing to the roster. A write that silently did not
+    // land would otherwise be discovered at the next switch, which is the worst
+    // possible moment.
+    if (stashA.kind === 'found') {
+      const check = await ctx.manager.credentials.readStash(b.slot, a.email);
+      if (check.kind !== 'found') throw new Error(`slot ${b.slot} did not receive its credential`);
+    }
+    if (stashB.kind === 'found') {
+      const check = await ctx.manager.credentials.readStash(a.slot, b.email);
+      if (check.kind !== 'found') throw new Error(`slot ${a.slot} did not receive its credential`);
+    }
+  } catch (err) {
+    // Roll the new copies back off. The originals were never touched, so the
+    // machine is exactly where it started.
+    await ctx.manager.credentials.deleteStash(b.slot, a.email);
+    await ctx.manager.credentials.deleteStash(a.slot, b.email);
+    ctx.manager.credentials.deleteAccountIdentity(b.slot, a.email);
+    ctx.manager.credentials.deleteAccountIdentity(a.slot, b.email);
+    ctx.out(`swap failed and was undone: ${(err as Error).message.slice(0, 160)}`);
+    return 1;
+  }
+
+  ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot));
+
+  // Only now are the originals redundant. A failure past this point leaves a
+  // stale copy at the old key, which is untidy but harmless — the roster no
+  // longer points at it and the next swap overwrites it.
   await ctx.manager.credentials.deleteStash(a.slot, a.email);
   await ctx.manager.credentials.deleteStash(b.slot, b.email);
   ctx.manager.credentials.deleteAccountIdentity(a.slot, a.email);
   ctx.manager.credentials.deleteAccountIdentity(b.slot, b.email);
 
-  ctx.manager.roster.update((r) => swapSlots(r, a.slot, b.slot));
   ctx.manager.cache.forget(a.slot);
   ctx.manager.cache.forget(b.slot);
   ctx.out(`swapped slots ${a.slot} and ${b.slot}`);

@@ -18,7 +18,7 @@ import { resolveIdentifier, slots } from '../accounts/roster.js';
 import { BurnStore, burnRateFrom } from './burn.js';
 import { DecisionJournal } from './history.js';
 import { assessRotationSafety, collectWorkload, estimateHeadroomNeeded } from './workload.js';
-import { type Action, type Decision, decide, decideHardKill } from './decide.js';
+import { type Action, type Decision, type RotorState, decide, decideHardKill } from './decide.js';
 import {
   performCheckpoint,
   newestSessionAcrossProjects,
@@ -492,6 +492,8 @@ async function applyWorkAwareGate(
   decision: Decision,
   usage: UsageReading,
   burn: BurnStore,
+  /** The state BEFORE this tick, so a refusal can restore what `decide()` set. */
+  state: RotorState,
 ): Promise<{ decision: Decision; unsavedTrees: number | null }> {
   const rotateAction = decision.actions.find((a) => a.kind === 'rotate');
   if (rotateAction === undefined) return { decision, unsavedTrees: null };
@@ -524,10 +526,16 @@ async function applyWorkAwareGate(
           ],
           reason: `${decision.reason}; ROTATION REFUSED — ${safety.reason}`,
           // The rotation did not happen, so the state must not record one.
+          //
+          // `decide()` sets these optimistically when it selects a target. This
+          // used to copy them straight through, which was a no-op dressed up as
+          // a correction: the cooldown would then believe a rotation had just
+          // occurred and suppress the NEXT one, which is the one that might
+          // actually have been allowed to run.
           nextState: {
             ...decision.nextState,
-            lastRotationAt: decision.nextState.lastRotationAt,
-            lastRotationTarget: decision.nextState.lastRotationTarget,
+            lastRotationAt: state.lastRotationAt,
+            lastRotationTarget: state.lastRotationTarget,
           },
         },
         unsavedTrees,
@@ -561,6 +569,13 @@ async function applyWorkAwareGate(
         ...decision,
         actions: [{ kind: 'blocked', reason: better.reason }, { kind: 'soft-checkpoint' }],
         reason: `${decision.reason}; ROTATION REFUSED — ${better.reason}`,
+        // Same reason as the refusal above: no rotation happened, so the
+        // cooldown must not think one did.
+        nextState: {
+          ...decision.nextState,
+          lastRotationAt: state.lastRotationAt,
+          lastRotationTarget: state.lastRotationTarget,
+        },
       },
       unsavedTrees,
     };
@@ -670,7 +685,7 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
 
     // The work-in-flight gate. This is what a headroom-only switcher cannot do,
     // and it runs BEFORE any rotation action, not after.
-    const gated = await applyWorkAwareGate(ctx, baseDecision, usage, burn);
+    const gated = await applyWorkAwareGate(ctx, baseDecision, usage, burn, state);
     const decision = gated.decision;
 
     const effects: ActionEffects = { taken: [], checkpointed: false, manifestPath: null };

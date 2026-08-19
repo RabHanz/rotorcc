@@ -542,10 +542,22 @@ export class CredentialStore {
     ensurePrivateDir(this.credentialsDir);
     const path = this.stashPath(slot, email);
 
-    if (existsSync(path)) {
+    // The cushion is taken from whatever the CURRENT stash actually is, through
+    // the same file-then-keychain read the rest of the code uses.
+    //
+    // Reading only the plaintext file was a real gap on macOS: a successful
+    // keychain write deletes that file, so from the second write onward
+    // `existsSync` was false and no previous generation was ever retained — on
+    // the platform where the credential moves between two backends and the
+    // cushion is most likely to be needed.
+    const existing = await this.readStash(slot, email);
+    if (existing.kind === 'found') {
       try {
-        const previous = readFileSync(path, 'utf8');
-        writeFileAtomic(this.stashPreviousPath(slot, email), previous, { mode: 0o600 });
+        writeFileAtomic(
+          this.stashPreviousPath(slot, email),
+          Buffer.from(existing.value, 'utf8').toString('base64'),
+          { mode: 0o600 },
+        );
       } catch {
         /* no cushion this time; the write below still has to happen */
       }

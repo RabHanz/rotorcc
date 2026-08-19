@@ -117,13 +117,21 @@ interface ExecError {
 /**
  * Write a generic password, replacing any existing item.
  *
- * `-U` updates in place. `-X` takes the value as hex, which keeps the secret
- * out of the process table only if the hex itself is not on the command line —
- * so it goes to stdin, and `-X -` is not a thing `security` supports, which is
- * why the value is written through the child's stdin with `-w` omitted.
+ * `-U` updates in place. `-X` marks the value as hex, and the hex goes to the
+ * child's STDIN rather than onto the command line: an argv element is visible
+ * in `ps` output to every user on the machine, which for a credential is simply
+ * not acceptable.
  *
- * `security` reads the password from stdin when neither `-w` nor `-X` carries a
- * value, so this passes the hex on stdin and marks it hex with `-X`.
+ * **The write is verified, not assumed.** `security`'s stdin behaviour for a
+ * value-less `-X` is not something this project can claim to know across every
+ * macOS release, and a silent no-op here would mean every keychain write
+ * quietly degrading to the file fallback with nothing to diagnose. So after
+ * writing we read the item back and compare. A mismatch throws, which routes
+ * the caller to its file fallback deliberately and with a reason, instead of
+ * accidentally and without one.
+ *
+ * That is more expensive than trusting the exit code. It is also the difference
+ * between "we believe this worked" and "we checked".
  */
 export async function setPassword(
   service: string,
@@ -152,6 +160,15 @@ export async function setPassword(
     );
     child.stdin?.end(hexEncode(value));
   });
+
+  const readBack = await getPassword(service, account, timeoutMs);
+  if (readBack.kind !== 'found' || readBack.value !== value) {
+    throw new KeychainError(
+      `keychain write for service ${service} did not verify: the item read back ` +
+        `${readBack.kind === 'found' ? 'differently' : readBack.kind}`,
+      -1,
+    );
+  }
 }
 
 /** Delete a generic password. Absent counts as success; anything else throws. */

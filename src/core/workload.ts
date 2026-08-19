@@ -41,6 +41,15 @@ export interface UnsavedTree {
   midOperation: string | null;
   /** True when there is nowhere to push this even if we wanted to. */
   noRemote: boolean;
+  /**
+   * True when rotorcc could not inspect this project at all.
+   *
+   * Its own category, and part of `needsHuman`. A project whose git state could
+   * not be read is not a project with nothing in it — rotorcc does not know
+   * whether it holds a protected branch, a rebase in progress, or an hour of
+   * uncommitted work, and "unknown" must fail toward refusing to rotate.
+   */
+  inspectionFailed: boolean;
 }
 
 export interface RunningSession {
@@ -86,6 +95,12 @@ export async function collectWorkload(
       // A project we cannot inspect is not a project with no work in it. It is
       // recorded as a tree that needs a human, so the refusal errs toward
       // "do not rotate" rather than toward "nothing to lose here".
+      //
+      // `inspectionFailed` is what actually puts it in `needsHuman`. Setting the
+      // three specific blockers to `false` and expecting the comment above to
+      // hold was a real defect: the entry landed in `savable`, the verdict came
+      // back "save-first" instead of "refuse", and a rotation could proceed past
+      // a project whose git state had never been read.
       unsaved.push({
         project: project.path,
         tree: project.path,
@@ -95,6 +110,7 @@ export async function collectWorkload(
         protectedBranch: false,
         midOperation: null,
         noRemote: false,
+        inspectionFailed: true,
       });
       continue;
     }
@@ -111,12 +127,13 @@ export async function collectWorkload(
         protectedBranch: tree.protectedBranch,
         midOperation: tree.midOperation,
         noRemote: !tree.hasRemote,
+        inspectionFailed: false,
       });
     }
   }
 
   const needsHuman = unsaved.filter(
-    (t) => t.protectedBranch || t.midOperation !== null || t.noRemote,
+    (t) => t.protectedBranch || t.midOperation !== null || t.noRemote || t.inspectionFailed,
   );
   const savable = unsaved.filter((t) => !needsHuman.includes(t));
 
@@ -193,9 +210,11 @@ function summariseBlockers(trees: UnsavedTree[]): string {
   const protectedCount = trees.filter((t) => t.protectedBranch).length;
   const midCount = trees.filter((t) => t.midOperation !== null).length;
   const noRemoteCount = trees.filter((t) => t.noRemote).length;
+  const uninspectable = trees.filter((t) => t.inspectionFailed).length;
   if (protectedCount > 0) parts.push(`${protectedCount} on a protected branch`);
   if (midCount > 0) parts.push(`${midCount} mid merge/rebase`);
   if (noRemoteCount > 0) parts.push(`${noRemoteCount} with no remote`);
+  if (uninspectable > 0) parts.push(`${uninspectable} whose git state could not be read`);
   return parts.join(', ');
 }
 

@@ -23,7 +23,7 @@
  * setting for a whole session.
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -100,6 +100,34 @@ export async function runAsAccount(options: RunAsOptions): Promise<number> {
   // The export-only mode hands the directory to the caller's shell, so it must
   // outlive this process. Every other path cleans up unconditionally.
   let keepHome = false;
+
+  // A `finally` alone does NOT cover this. That directory holds a plaintext
+  // OAuth credential, and Ctrl-C on `rotorcc run … -- claude` delivers SIGINT to
+  // the whole foreground process group: node terminates without unwinding, the
+  // `finally` never runs, and the credential is left in /tmp indefinitely.
+  //
+  // So: an `exit` handler (covers a normal return, an uncaught throw, and
+  // `process.exit`) plus explicit signal handlers that clean up and then
+  // re-raise with the default disposition, so the exit status a caller sees is
+  // still the conventional 128+signal.
+  const removeHome = (): void => {
+    if (keepHome) return;
+    try {
+      rmSync(home, { recursive: true, force: true });
+    } catch {
+      /* nothing further to try; the message below is the report */
+    }
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    removeHome();
+    process.removeListener('exit', removeHome);
+    process.kill(process.pid, signal);
+  };
+  process.on('exit', removeHome);
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  process.once('SIGHUP', onSignal);
+
   try {
     writeFileAtomic(join(home, '.credentials.json'), stash.value, { mode: 0o600 });
     const identity = manager.credentials.readAccountIdentity(slot.slot, slot.email);
@@ -142,12 +170,15 @@ export async function runAsAccount(options: RunAsOptions): Promise<number> {
     });
     return code;
   } finally {
-    // Runs on a normal exit, an exception, and a rejected promise. A credential
-    // left in /tmp because a command threw is not an acceptable failure mode.
-    if (!keepHome) {
-      try {
-        rmSync(home, { recursive: true, force: true });
-      } catch {
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+    process.removeListener('SIGHUP', onSignal);
+    if (keepHome) {
+      process.removeListener('exit', removeHome);
+    } else {
+      removeHome();
+      process.removeListener('exit', removeHome);
+      if (existsSync(home)) {
         out(`warning: could not remove ${home}, which holds a credential. Delete it by hand.`);
       }
     }

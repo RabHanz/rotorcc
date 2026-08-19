@@ -25,13 +25,14 @@ function tree(overrides: Partial<UnsavedTree> = {}): UnsavedTree {
     protectedBranch: false,
     midOperation: null,
     noRemote: false,
+    inspectionFailed: false,
     ...overrides,
   };
 }
 
 function workload(unsaved: UnsavedTree[], activeSessions = 1): WorkloadSnapshot {
   const needsHuman = unsaved.filter(
-    (t) => t.protectedBranch || t.midOperation !== null || t.noRemote,
+    (t) => t.protectedBranch || t.midOperation !== null || t.noRemote || t.inspectionFailed,
   );
   const sessions = Array.from({ length: activeSessions }, (_, i) => ({
     sessionId: `s${i}`,
@@ -94,12 +95,21 @@ describe('assessRotationSafety', () => {
     expect(safety.verdict === 'refuse' && safety.trees[0]?.branch).toBe('main');
   });
 
-  it('counts an uninspectable tree as at risk rather than as empty', () => {
-    // A project rotorcc could not read is not a project with nothing in it.
+  it('REFUSES for a project whose git state could not be read at all', () => {
+    // A project rotorcc could not inspect is not a project with nothing in it.
+    // It does not know whether that project holds a protected branch, a rebase
+    // in progress, or an hour of uncommitted work — and unknown has to fail
+    // toward refusing.
+    //
+    // This asserted only `not.toBe('safe')` until 2026-08-19, which the code
+    // satisfied by returning 'save-first'. That let a rotation proceed past a
+    // project whose state had never been read, because the daemon's gate blocks
+    // only on 'refuse'.
     const safety = assessRotationSafety(
-      workload([tree({ branch: '(unknown)', unpushedCommits: null })]),
+      workload([tree({ branch: '(unknown)', unpushedCommits: null, inspectionFailed: true })]),
     );
-    expect(safety.verdict).not.toBe('safe');
+    expect(safety.verdict).toBe('refuse');
+    expect(safety.reason).toContain('could not be read');
   });
 });
 

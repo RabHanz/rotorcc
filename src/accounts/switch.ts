@@ -150,6 +150,10 @@ export async function switchAccount(options: SwitchOptions): Promise<SwitchResul
   // A rollback record. Only what is needed to put the machine back, and it
   // lives on the stack: nothing here is ever written to disk.
   const undo: Array<{ step: string; run: () => Promise<void> }> = [];
+  // Whether the target credential actually became live. Tracked separately from
+  // `undo` because the failure message an operator acts on turns on this exact
+  // fact, and inferring it from the rollback stack is how it got inferred wrong.
+  let activated = false;
 
   const result = await withClaudeCredentialsLock(
     async () =>
@@ -182,13 +186,38 @@ export async function switchAccount(options: SwitchOptions): Promise<SwitchResul
               live.kind === 'found' ? live.value : null,
             );
             const backend = await credentials.writeActive(composed);
+            activated = true;
             steps.push(`activated slot ${target.slot} (${backend})`);
+
+            // An undo entry is pushed for the credential write WHATEVER the
+            // previous state was — that is what makes `undo.length === 0` mean
+            // "nothing was written", which the failure path below relies on to
+            // choose its message.
+            //
+            // Registering it only when there was a previous credential to
+            // restore was a real defect: an operator with no live login (logged
+            // out, or the file transiently unreadable) whose switch then failed
+            // at step 4 or 5 was told "switch failed before anything was
+            // written", while Claude Code was already running as the target.
             if (live.kind === 'found') {
               const previous = live.value;
               undo.push({
                 step: 'credential',
                 run: async () => {
                   await credentials.writeActive(previous);
+                },
+              });
+            } else {
+              // There was nothing to put back. Record the step anyway so the
+              // caller cannot be told nothing happened; the rollback itself is
+              // a no-op that reports honestly.
+              undo.push({
+                step: 'credential',
+                run: async () => {
+                  throw new Error(
+                    'the target credential was activated and there was no previous ' +
+                      'credential to restore; this machine is now on the target account',
+                  );
                 },
               });
             }
@@ -263,7 +292,12 @@ export async function switchAccount(options: SwitchOptions): Promise<SwitchResul
     };
   }
 
-  if (undo.length === 0) {
+  // `activated` and not `undo.length`, because those are different questions and
+  // only one of them is the one the operator acts on. "Nothing was written" is a
+  // claim about the machine's state, and making it after the target credential
+  // is already live sends someone to investigate a switch that has in fact
+  // happened.
+  if (!activated && undo.length === 0) {
     return {
       ok: false,
       fromSlot: fromSlot?.slot ?? null,

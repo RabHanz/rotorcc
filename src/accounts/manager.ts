@@ -19,7 +19,14 @@
 import type { Config } from '../config/schema.js';
 import { appPaths } from '../core/paths.js';
 import type { AccountReading, UsageReading, WindowReading } from '../core/usage.js';
-import { CredentialStore, type Secret, accessTokenExpired, oauthPayload } from './credentials.js';
+import { withClaudeCredentialsLock } from './ccLock.js';
+import {
+  CredentialStore,
+  type Secret,
+  accessTokenExpired,
+  credentialFingerprint,
+  oauthPayload,
+} from './credentials.js';
 import { type UsageWindow, bindingWindow, clampPct, fetchUsage, refreshToken } from './oauth.js';
 import { RosterStore, type RosterSlot, slots } from './roster.js';
 import { UsageCache, freshnessOf } from './usageCache.js';
@@ -84,7 +91,6 @@ export class AccountManager {
       return { slot: null, reason: 'no Claude Code credential is present on this machine' };
     }
 
-    const { credentialFingerprint } = await import('./credentials.js');
     const liveFingerprint = credentialFingerprint(active.value);
     if (liveFingerprint === null) {
       return { slot: null, reason: 'the live credential could not be fingerprinted' };
@@ -133,12 +139,38 @@ export class AccountManager {
     const detected = await this.detectActiveSlot();
     const accounts: AccountReading[] = [];
     for (const slot of all) {
-      accounts.push(
-        await this.readOne(slot, {
-          force: options.force ?? false,
+      // Every account is read inside its own guard. One account that throws —
+      // a credential write that hit an unparseable config, a lock timeout, a
+      // filesystem error — must cost THAT account and no other.
+      //
+      // This is the same discipline the individual `safeParse` per account
+      // enforces one layer down, and it exists for the same reason: on
+      // 2026-08-19 a single bad entry took the whole reading down, `status`
+      // printed "accounts unreadable", and no rotation ever fired.
+      try {
+        accounts.push(
+          await this.readOne(slot, {
+            force: options.force ?? false,
+            active: detected.slot === slot.slot,
+          }),
+        );
+      } catch (err) {
+        accounts.push({
+          number: slot.slot,
+          email: slot.email,
+          alias: slot.alias === '' ? undefined : slot.alias,
           active: detected.slot === slot.slot,
-        }),
-      );
+          disabled: slot.disabled,
+          kind: slot.kind,
+          headroomPct: 0,
+          headroomKnown: false,
+          unknownReason: `reading this account threw: ${(err as Error).message.slice(0, 160)}`,
+          bindingWindow: 'unknown',
+          windows: [],
+          stale: true,
+          usageAgeMs: null,
+        });
+      }
     }
 
     return {
@@ -304,38 +336,85 @@ export class AccountManager {
     }
 
     if (accessTokenExpired(payload.expiresAt, this.now().getTime())) {
-      const refreshed = await refreshToken(credential, {
-        degraded: stash.degraded,
-        ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}),
-      });
-      if (!refreshed.ok) {
-        if (refreshed.error === 'invalid_grant' || refreshed.error === 'no_refresh_token') {
-          return {
-            kind: 'credential-problem',
-            reason: `this account needs a fresh login (${refreshed.error})`,
-          };
-        }
-        return {
-          kind: 'credential-problem',
-          reason: `token refresh did not succeed (${refreshed.error}); quota unknown`,
-        };
-      }
-      credential = refreshed.credential;
-      // Persist BEFORE using it. The old refresh token is dead the instant the
-      // server answered; if the process dies between here and the next write,
-      // the stash must already hold the successor or the account is lost.
-      await this.credentials.writeStash(slot.slot, slot.email, credential);
-      const live = await this.credentials.readActive();
-      const { credentialFingerprint } = await import('./credentials.js');
-      if (
-        live.kind === 'found' &&
-        !live.degraded &&
-        credentialFingerprint(live.value) === credentialFingerprint(stash.value)
-      ) {
-        // This slot is the live login and we just rotated its token. Claude
-        // Code must see the successor, or its next call uses a dead one.
-        await this.credentials.writeActive(credential);
-      }
+      // The ENTIRE refresh — POST, stash write, and the possible live-credential
+      // write — happens under Claude Code's own credential locks.
+      //
+      // Without them this is exactly the race `ccLock.ts` exists to prevent: a
+      // live Claude Code refreshing the same account at the same moment, both
+      // processes POSTing the same one-time refresh token, and whichever write
+      // lands last deciding whether the machine ends up holding a working token
+      // or a dead one. A background quota poll must not be able to do that.
+      const outcome = await withClaudeCredentialsLock(
+        async (): Promise<PollOutcome | { kind: 'refreshed'; credential: Secret }> => {
+          // Re-read inside the lock. If Claude Code refreshed while we were
+          // waiting for it, the stash we read outside is already superseded and
+          // POSTing its refresh token would spend a dead one.
+          const fresh = await this.credentials.readStash(slot.slot, slot.email);
+          const current = fresh.kind === 'found' ? fresh.value : credential;
+          const currentPayload = oauthPayload(current);
+          if (
+            currentPayload !== null &&
+            !accessTokenExpired(currentPayload.expiresAt, this.now().getTime())
+          ) {
+            // Somebody else refreshed it. Use theirs; spend nothing.
+            return { kind: 'refreshed', credential: current };
+          }
+
+          const refreshed = await refreshToken(current, {
+            degraded: fresh.kind === 'found' ? fresh.degraded : stash.degraded,
+            ...(this.fetchImpl !== undefined ? { fetchImpl: this.fetchImpl } : {}),
+          });
+          if (!refreshed.ok) {
+            if (refreshed.error === 'invalid_grant' || refreshed.error === 'no_refresh_token') {
+              return {
+                kind: 'credential-problem',
+                reason: `this account needs a fresh login (${refreshed.error})`,
+              };
+            }
+            return {
+              kind: 'credential-problem',
+              reason: `token refresh did not succeed (${refreshed.error}); quota unknown`,
+            };
+          }
+
+          // Persist BEFORE using it. The old refresh token is dead the instant
+          // the server answered; if the process dies between here and the next
+          // write, the stash must already hold the successor or the account is
+          // lost.
+          await this.credentials.writeStash(slot.slot, slot.email, refreshed.credential);
+
+          const live = await this.credentials.readActive();
+          if (
+            live.kind === 'found' &&
+            !live.degraded &&
+            credentialFingerprint(live.value) === credentialFingerprint(current)
+          ) {
+            // This slot is the live login and we just rotated its token. Claude
+            // Code must see the successor, or its next call uses a dead one.
+            //
+            // A failure here is this ACCOUNT's problem and must not propagate:
+            // `writeActive` can legitimately throw (a global config that exists
+            // but will not parse is a deliberate refusal), and letting that out
+            // aborts the quota read for every other account in the pass.
+            try {
+              await this.credentials.writeActive(refreshed.credential);
+            } catch (err) {
+              return {
+                kind: 'credential-problem',
+                reason:
+                  'the refreshed token could not be written as the live credential ' +
+                  `(${(err as Error).message.slice(0, 120)}); Claude Code may still be ` +
+                  'holding a token that has been superseded',
+              };
+            }
+          }
+          return { kind: 'refreshed', credential: refreshed.credential };
+        },
+        { ...(this.env.CLAUDE_CONFIG_DIR !== undefined ? { env: this.env } : {}) },
+      );
+
+      if (outcome.kind !== 'refreshed') return outcome;
+      credential = outcome.credential;
     }
 
     const accessToken = oauthPayload(credential)?.accessToken;
