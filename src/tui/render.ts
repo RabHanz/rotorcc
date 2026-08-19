@@ -53,7 +53,15 @@ export interface DashboardModel {
   watcher: { detail: string; healthy: boolean | null };
   decisions: DecisionEntry[];
   consecutiveIdle: number;
-  flags: { soft: boolean; rotate: boolean };
+  flags: { soft: boolean; rotate: boolean; allExhausted: boolean };
+  /**
+   * The account the NEXT session will open on, when one is queued.
+   *
+   * Shown because it is the single most surprising thing rotorcc can do — an
+   * operator who starts a session and lands on a different account must be able
+   * to have seen that coming.
+   */
+  pendingHandover: { slot: number; reason: string; expiresAt: string } | null;
   /** True when this rotorcc is configured to never actually act. */
   dryRun: boolean;
   /** True when a refresh is in flight, so the header can say so. */
@@ -207,6 +215,27 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   push(`  ${padVisible('watcher', 12)} ${watcher}`);
   if (model.flags.rotate) push(`  ${padVisible('flag', 12)} ${c.bad('ROTATE_NOW is raised')}`);
   if (model.flags.soft) push(`  ${padVisible('flag', 12)} ${c.warn('SOFT_CHECKPOINT is raised')}`);
+  push();
+
+  // ---------------------------------------------------------------- policy
+  push(c.bold('NEXT SESSION'));
+  if (model.flags.allExhausted) {
+    // The loudest thing on the screen, because it is the one state where
+    // rotorcc has nothing useful left to do and the operator has to act.
+    push(`  ${c.bad('ALL ACCOUNTS OUT OF WEEKLY QUOTA — rotorcc has stopped')}`);
+    push(
+      `  ${c.dim('nothing will be rotated or started. Wait for a reset above, or add an account.')}`,
+    );
+  } else if (model.pendingHandover !== null) {
+    push(
+      `  ${c.accent(`will open on slot ${model.pendingHandover.slot}`)} ` +
+        `${c.dim(`(expires ${model.pendingHandover.expiresAt.slice(11, 16)})`)}`,
+    );
+    push(`  ${c.dim(truncateVisible(model.pendingHandover.reason, width - 4))}`);
+    push(`  ${c.dim('the running session keeps its own account; nothing is interrupted')}`);
+  } else {
+    push(`  ${c.dim('no handover queued — the next session opens on the current account')}`);
+  }
   push();
 
   // ------------------------------------------------------------- decisions

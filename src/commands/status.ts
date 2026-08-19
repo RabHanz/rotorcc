@@ -10,7 +10,13 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { Config } from '../config/schema.js';
 import { levelFor } from '../core/decide.js';
 import { run } from '../core/proc.js';
-import { FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, type Store } from '../core/state.js';
+import {
+  FLAG_ALL_EXHAUSTED,
+  FLAG_ROTATE_NOW,
+  FLAG_SOFT_CHECKPOINT,
+  type Store,
+} from '../core/state.js';
+import { PendingSwitchStore } from '../core/nextSession.js';
 import { allSessions } from '../core/transcripts.js';
 import { type UsageReading, activeAccount } from '../core/usage.js';
 import { discoverTrees } from '../core/worktrees.js';
@@ -22,7 +28,9 @@ export interface StatusReport {
   store: { path: string; exists: boolean; lastCommit: string | null; lastCommitAt: string | null };
   lastSnapshotAt: string | null;
   lastManifest: string | null;
-  flags: { soft: boolean; rotate: boolean };
+  flags: { soft: boolean; rotate: boolean; allExhausted: boolean };
+  /** The account the next session will open on, when one is queued. */
+  pendingHandover: { slot: number; reason: string; expiresAt: string } | null;
   lanes: Array<{
     project: string;
     tree: string;
@@ -142,7 +150,16 @@ export async function buildStatus(
       // exit on a false alarm.
       soft: store.readFlag(FLAG_SOFT_CHECKPOINT, { currentLevel: level }) !== null,
       rotate: store.readFlag(FLAG_ROTATE_NOW, { currentLevel: level }) !== null,
+      // Deliberately NOT level-checked. "Every account is out of weekly quota"
+      // is not invalidated by the active account's binding window recovering —
+      // a 5-hour window refilling says nothing about the week.
+      allExhausted: store.readFlag(FLAG_ALL_EXHAUSTED) !== null,
     },
+    pendingHandover: (() => {
+      const pending = new PendingSwitchStore(store.dir).peek();
+      if (pending === null || pending.dryRun) return null;
+      return { slot: pending.slot, reason: pending.reason, expiresAt: pending.expiresAt };
+    })(),
     lanes,
     unsavedTrees: lanes.length,
     scheduler: { detail: await schedulerStatus(config) },
@@ -191,10 +208,23 @@ export function renderStatus(report: StatusReport, config: Config): string {
   push(`  manifest     ${report.lastManifest ?? 'none written'}`);
   push(`  watcher      ${report.scheduler.detail}`);
 
-  if (report.flags.rotate || report.flags.soft) {
+  if (report.flags.rotate || report.flags.soft || report.flags.allExhausted) {
     push('');
+    if (report.flags.allExhausted) {
+      push('  STOPPED      every account is out of weekly quota; rotorcc will not rotate or start');
+      push('               anything. Wait for a reset above, or: rotorcc accounts add');
+    }
     if (report.flags.rotate) push('  FLAG         ROTATE_NOW is raised');
     if (report.flags.soft) push('  FLAG         SOFT_CHECKPOINT_REQUESTED is raised');
+  }
+
+  push('');
+  if (report.pendingHandover !== null) {
+    push(`  next session opens on slot ${report.pendingHandover.slot}`);
+    push(`               ${report.pendingHandover.reason}`);
+    push('               the running session keeps its own account; nothing is interrupted');
+  } else {
+    push('  next session opens on the current account (no handover queued)');
   }
 
   push('');

@@ -16,7 +16,13 @@ import { AccountManager } from '../accounts/manager.js';
 import { BurnStore, burnRateFrom, predictThreshold, willFinishFirst } from '../core/burn.js';
 import { DecisionJournal } from '../core/history.js';
 import { run } from '../core/proc.js';
-import { FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, type Store } from '../core/state.js';
+import {
+  FLAG_ALL_EXHAUSTED,
+  FLAG_ROTATE_NOW,
+  FLAG_SOFT_CHECKPOINT,
+  type Store,
+} from '../core/state.js';
+import { PendingSwitchStore } from '../core/nextSession.js';
 import type { UsageReading } from '../core/usage.js';
 import {
   type WorkloadSnapshot,
@@ -134,7 +140,15 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
     flags: {
       soft: store.readFlag(FLAG_SOFT_CHECKPOINT) !== null,
       rotate: store.readFlag(FLAG_ROTATE_NOW) !== null,
+      allExhausted: store.readFlag(FLAG_ALL_EXHAUSTED) !== null,
     },
+    pendingHandover: (() => {
+      // `peek`, never `consume`: the dashboard must not be able to swallow the
+      // intent that SessionStart is waiting for.
+      const pending = new PendingSwitchStore(store.dir).peek();
+      if (pending === null || pending.dryRun) return null;
+      return { slot: pending.slot, reason: pending.reason, expiresAt: pending.expiresAt };
+    })(),
     dryRun: options.dryRun,
     refreshing: false,
     noAccountsHint,

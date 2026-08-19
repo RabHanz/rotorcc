@@ -212,7 +212,8 @@ describe('the dashboard under stress', () => {
     watcher: { detail: 'systemd timer active', healthy: true },
     decisions: [],
     consecutiveIdle: 0,
-    flags: { soft: false, rotate: false },
+    flags: { soft: false, rotate: false, allExhausted: false },
+    pendingHandover: null,
     dryRun: false,
     refreshing: false,
     noAccountsHint: null,
@@ -263,6 +264,40 @@ describe('the dashboard under stress', () => {
     ).join('\n');
     expect(text).toContain('WOULD REFUSE TO ROTATE');
     expect(text).toContain('mid-rebase');
+  });
+
+  it('shows a queued handover, because landing on a different account must not surprise', () => {
+    const text = renderDashboard(
+      {
+        ...model,
+        pendingHandover: {
+          slot: 3,
+          reason: 'weekly window down to 3% on 7d',
+          expiresAt: '2026-08-19T18:00:00Z',
+        },
+      },
+      { palette: colours, width: 120 },
+    ).join('\n');
+    expect(text).toContain('NEXT SESSION');
+    expect(text).toContain('will open on slot 3');
+    expect(text).toContain('weekly window down to 3%');
+    // The reassurance that matters: the running session is not being touched.
+    expect(text).toContain('nothing is interrupted');
+  });
+
+  it('says plainly when no handover is queued, rather than leaving it blank', () => {
+    const text = renderDashboard(model, { palette: colours, width: 120 }).join('\n');
+    expect(text).toContain('no handover queued');
+  });
+
+  it('makes the all-exhausted stop the loudest thing on the screen', () => {
+    const text = renderDashboard(
+      { ...model, flags: { soft: false, rotate: false, allExhausted: true } },
+      { palette: colours, width: 120 },
+    ).join('\n');
+    expect(text).toContain('ALL ACCOUNTS OUT OF WEEKLY QUOTA');
+    expect(text).toContain('rotorcc has stopped');
+    expect(text).toContain('Wait for a reset');
   });
 
   it('points at how to add an account when there are none', () => {
