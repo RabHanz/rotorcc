@@ -23,6 +23,15 @@ import { type RotorState, emptyState } from './decide.js';
 
 export const FLAG_SOFT_CHECKPOINT = 'SOFT_CHECKPOINT_REQUESTED';
 export const FLAG_ROTATE_NOW = 'ROTATE_NOW';
+/**
+ * Every managed account is out of weekly quota.
+ *
+ * Distinct from `ROTATE_NOW` because the instruction is the opposite one:
+ * ROTATE_NOW means "wrap up, a replacement is coming"; this means "there is
+ * nowhere to go, stop starting things and wait". Telling an agent to hand over
+ * to a successor that cannot exist is worse than telling it nothing.
+ */
+export const FLAG_ALL_EXHAUSTED = 'ALL_ACCOUNTS_EXHAUSTED';
 
 export interface FlagPayload {
   raisedAt: string;

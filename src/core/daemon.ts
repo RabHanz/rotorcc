@@ -18,7 +18,16 @@ import { resolveIdentifier, slots } from '../accounts/roster.js';
 import { BurnStore, burnRateFrom } from './burn.js';
 import { DecisionJournal } from './history.js';
 import { assessRotationSafety, collectWorkload, estimateHeadroomNeeded } from './workload.js';
-import { type Action, type Decision, type RotorState, decide, decideHardKill } from './decide.js';
+import {
+  type Action,
+  type Decision,
+  type Level,
+  type RotorState,
+  decide,
+  decideHardKill,
+} from './decide.js';
+import { PendingSwitchStore } from './nextSession.js';
+import { evaluatePolicy, renderStopNotice, weeklyHeadroom } from './policy.js';
 import {
   performCheckpoint,
   newestSessionAcrossProjects,
@@ -26,7 +35,13 @@ import {
 } from './checkpoint.js';
 import type { Logger } from './log.js';
 import { run } from './proc.js';
-import { FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, Store, timestampSlug } from './state.js';
+import {
+  FLAG_ALL_EXHAUSTED,
+  FLAG_ROTATE_NOW,
+  FLAG_SOFT_CHECKPOINT,
+  Store,
+  timestampSlug,
+} from './state.js';
 import { findWindowForCwd, launchSuccessor, retireWindow } from './successor.js';
 import { checkLiveness, detectLimitSignature, readTail, unescapeJsonish } from './transcripts.js';
 import {
@@ -468,6 +483,231 @@ async function retireOnQuiesce(ctx: TickContext, handle: string): Promise<string
 }
 
 /**
+ * The weekly-priority policy, applied to a machine with no dead session.
+ *
+ * Returns null when the policy has nothing to say and the older threshold
+ * machinery should run instead (which is where warn/soft checkpointing and the
+ * latches live). Returns a decision when the policy itself is the answer:
+ *
+ *   handover  record which account the NEXT session opens on. The running one
+ *             is untouched — that is the whole point of the redesign.
+ *   stop      every account is spent. Nothing is rotated, nothing is spawned,
+ *             nothing is queued, and the operator is told plainly.
+ *   checkpoint the 5-hour window is low but the week is fine: save and stay.
+ *
+ * Nothing in here launches a process. A successor is only ever a replacement
+ * for a session whose process is gone, and that path is reached elsewhere.
+ */
+async function applySessionPolicy(
+  ctx: TickContext,
+  usage: UsageReading,
+): Promise<{ decision: Decision; actionsTaken: string[]; level: Level } | null> {
+  const { config, store, logger } = ctx;
+
+  // Is a session actually alive? This decides whether a handover takes effect
+  // now or at the next start, and it is a FACT we check rather than infer.
+  const session = newestSessionAcrossProjects(config);
+  const sessionAlive =
+    session === null ? false : !(await checkLiveness(config, session.transcriptPath)).dead;
+
+  const action = evaluatePolicy({ reading: usage, config, sessionAlive });
+  const active = activeAccount(usage);
+  const activeWeekly =
+    active === null ? { pct: null, window: 'unknown' } : weeklyHeadroom(active, config.models);
+
+  const state = store.readState();
+
+  /**
+   * Fire at most once per quota window.
+   *
+   * Without this the policy would checkpoint on EVERY tick for as long as the
+   * window stays low — a commit and a push every sixty seconds for four hours,
+   * which is precisely what the latches in `decide()` were built to prevent and
+   * what a busy orchestrator experienced in production on 2026-08-18.
+   *
+   * Keyed on the reset time of the window that drove the decision, so a window
+   * rolling over re-arms it and nothing else does.
+   */
+  const windowKey = `${action.kind}:${active?.bindingResetsAt ?? activeWeekly.window}`;
+  const latched = state.policyLatch?.windowKey === windowKey;
+  const armLatch = (): RotorState => ({
+    ...state,
+    policyLatch: { windowKey, at: new Date().toISOString() },
+    latchedAccount: active?.number ?? state.latchedAccount,
+  });
+
+  const asDecision = (reason: string, level: Level, actions: Decision['actions']): Decision => ({
+    level,
+    headroomPct: activeWeekly.pct ?? 0,
+    bindingWindow: activeWeekly.window,
+    activeAccount: active?.number ?? null,
+    actions,
+    reason,
+    nextState: store.readState(),
+  });
+
+  switch (action.kind) {
+    case 'none':
+    case 'warn':
+      // Let the existing threshold machinery handle warn-level behaviour; it
+      // owns the latches and the hysteresis and there is no reason to duplicate
+      // that here.
+      return null;
+
+    case 'checkpoint': {
+      if (latched) {
+        // Already saved for this window. Say so rather than doing it again.
+        return {
+          decision: asDecision(
+            `${action.reason} (already checkpointed for this window)`,
+            'soft',
+            [],
+          ),
+          actionsTaken: [],
+          level: 'soft',
+        };
+      }
+      const result = await performCheckpoint({
+        config,
+        store,
+        logger,
+        trigger: 'policy:five-hour-low',
+        dryRun: ctx.dryRun,
+        usage,
+        writeManifest: false,
+      });
+      const pushed = result.projects.reduce(
+        (n, p) => n + p.outcomes.filter((o) => o.pushed).length,
+        0,
+      );
+      logger.info('five-hour window low, weekly healthy: checkpointed and stayed put', {
+        pushed,
+      });
+      return {
+        decision: {
+          ...asDecision(action.reason, 'soft', [{ kind: 'soft-checkpoint' }]),
+          nextState: armLatch(),
+        },
+        actionsTaken: ['policy-checkpoint'],
+        level: 'soft',
+      };
+    }
+
+    case 'stop': {
+      if (latched) {
+        // The notice has already been given for this window. Repeating a
+        // full-screen stop banner every sixty seconds trains an operator to
+        // scroll past it, which defeats the one job it has.
+        return {
+          decision: asDecision(`STOPPED — ${action.reason} (notice already given)`, 'rotate', [
+            { kind: 'blocked', reason: action.reason },
+          ]),
+          actionsTaken: [],
+          level: 'rotate',
+        };
+      }
+      // Save what can be saved, then stop and make sure a human sees it.
+      await performCheckpoint({
+        config,
+        store,
+        logger,
+        trigger: 'policy:all-accounts-exhausted',
+        dryRun: ctx.dryRun,
+        usage,
+        writeManifest: true,
+        cleanExit: false,
+      });
+
+      const notice = renderStopNotice(action);
+      logger.error('ALL ACCOUNTS EXHAUSTED — rotorcc has stopped and is waiting for a human');
+      // Straight to stderr as well as the log. This is the one situation where
+      // rotorcc has nothing useful left to do, and a line buried in a log file
+      // is not the operator finding out.
+      process.stderr.write(notice);
+
+      if (!ctx.dryRun) {
+        store.raiseFlag(FLAG_ALL_EXHAUSTED, {
+          raisedAt: new Date().toISOString(),
+          level: 'rotate',
+          reason: action.reason,
+        });
+      }
+
+      return {
+        decision: {
+          ...asDecision(`STOPPED — ${action.reason}`, 'rotate', [
+            { kind: 'blocked', reason: action.reason },
+            { kind: 'soft-checkpoint' },
+          ]),
+          nextState: armLatch(),
+        },
+        actionsTaken: ['policy-stop', 'manifest'],
+        level: 'rotate',
+      };
+    }
+
+    case 'handover': {
+      if (latched) {
+        // The intent is already recorded for this window. Re-recording it is
+        // harmless, but the checkpoint beside it is not — that is a commit and
+        // a push every sixty seconds until the window resets.
+        return {
+          decision: asDecision(`${action.reason} (handover already queued)`, 'soft', []),
+          actionsTaken: [],
+          level: 'soft',
+        };
+      }
+      const pending = new PendingSwitchStore(store.dir);
+      pending.record({
+        slot: action.slot,
+        reason: action.reason,
+        decidedAt: new Date().toISOString(),
+        fromHeadroomPct: activeWeekly.pct,
+        window: action.window,
+        dryRun: ctx.dryRun,
+      });
+
+      // Checkpoint too. The handover takes effect at the next session start,
+      // and between now and then this session keeps working on an account that
+      // is nearly out — so its work should already be safe.
+      await performCheckpoint({
+        config,
+        store,
+        logger,
+        trigger: 'policy:handover-queued',
+        dryRun: ctx.dryRun,
+        usage,
+        writeManifest: false,
+      });
+
+      logger.info('queued an account handover for the next session', {
+        slot: action.slot,
+        sessionAlive,
+        dryRun: ctx.dryRun,
+      });
+
+      return {
+        decision: {
+          ...asDecision(action.reason, 'soft', [
+            {
+              kind: 'blocked',
+              reason: 'handover queued for the next session; nothing interrupted',
+            },
+            { kind: 'soft-checkpoint' },
+          ]),
+          nextState: armLatch(),
+        },
+        actionsTaken: [
+          ctx.dryRun ? 'dry-run-handover-queued' : 'handover-queued',
+          'soft-checkpoint',
+        ],
+        level: 'soft',
+      };
+    }
+  }
+}
+
+/**
  * The work-aware gate: reconsider a rotation in the light of what is running.
  *
  * A plain switcher asks "which account has the most left". rotorcc asks two
@@ -670,18 +910,48 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
 
     const state = store.readState();
     const kill = await detectHardKill(ctx);
-    const baseDecision =
-      kill === null
-        ? decide(usage, config, state)
-        : decideHardKill(usage, config, state, kill.kind);
-
-    if (kill !== null) logger.error('hard kill detected', { detail: kill.detail });
 
     // Record a burn sample for every account we could actually measure. Only
     // measured ones: a placeholder zero here becomes a cliff in the series and
     // the next prediction claims the account dies in ninety seconds.
     const burn = new BurnStore(store.dir);
     for (const account of usage.accounts) burn.record(account);
+
+    // ---------------------------------------------------------------------
+    // The weekly-priority policy, evaluated FIRST.
+    //
+    // A live session cannot have its account changed underneath it, so the
+    // watcher's job while one is running is to warn, checkpoint, and record
+    // which account the NEXT session should open on. It never interrupts, and
+    // it never spawns a companion. The old model did both and put two sessions
+    // on one worktree (2026-08-19).
+    //
+    // The successor path below survives only for a session that is genuinely
+    // DEAD — `kill !== null` means the process is gone, verified by liveness.
+    // ---------------------------------------------------------------------
+    if (kill === null) {
+      const policyResult = await applySessionPolicy(ctx, usage);
+      if (policyResult !== null) {
+        journalDecision(ctx, policyResult.decision, policyResult.actionsTaken, null);
+        // The policy's own `nextState` carries its latch; without persisting it
+        // the latch never arms and the checkpoint repeats every tick.
+        store.writeState({ ...policyResult.decision.nextState, lastLevel: policyResult.level });
+        return {
+          ok: true,
+          decision: policyResult.decision,
+          actionsTaken: policyResult.actionsTaken,
+          hardKill: null,
+          detail: policyResult.decision.reason,
+        };
+      }
+    }
+
+    const baseDecision =
+      kill === null
+        ? decide(usage, config, state)
+        : decideHardKill(usage, config, state, kill.kind);
+
+    if (kill !== null) logger.error('hard kill detected', { detail: kill.detail });
 
     // The work-in-flight gate. This is what a headroom-only switcher cannot do,
     // and it runs BEFORE any rotation action, not after.

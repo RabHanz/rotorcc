@@ -1,0 +1,76 @@
+{
+  "status": "reviewed",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/accounts/switch.ts",
+      "line": 271,
+      "summary": "switchAccount can report \"switch failed before anything was written\" after it has already activated the target credential, because the credential-write step runs unconditionally but the matching rollback (`undo`) entry is only registered when `live.kind === 'found'`.",
+      "failure_scenario": "An operator whose Claude Code login is currently absent or unreadable (e.g. they logged out, or the credentials file is temporarily unreadable) runs `rotorcc switch <account>`. Step 2/3 (`await credentials.writeActive(composed)` at line ~182) succeeds and Claude Code's live credential is now the target account \u2014 but because `live.kind !== 'found'`, no undo entry is pushed for it. A later step (identity write via `updateGlobalConfig`, or the roster write) then throws, e.g. because `~/.claude.json` or `roster.json` is present but unparsable, which those methods deliberately refuse to silently overwrite. The catch block returns `{failure: err}`; since `undo.length === 0`, the function returns `ok:false, rolledBack:null, detail: 'switch failed before anything was written'`. The operator, trusting that message, retries or investigates as if nothing changed, while Claude Code is in fact already running under the new account with no record of the switch in the roster."
+    },
+    {
+      "severity": "P1",
+      "file": "src/accounts/manager.ts",
+      "line": 330,
+      "summary": "AccountManager.pollOne() refreshes an OAuth token and conditionally writes it as Claude Code's live credential without acquiring withClaudeCredentialsLock, unlike switchAccount(), reopening exactly the race the lock module says corrupts a login.",
+      "failure_scenario": "The daemon tick or any `rotorcc accounts`/`doctor`/`predict` invocation calls readUsage(), which polls the active account and finds its access token expired. pollOne() calls refreshToken() (spending the one-time refresh token), writes the new credential to the stash, then reads Claude Code's live credential and, if it fingerprints to the same account, calls credentials.writeActive(credential) \u2014 all without holding oauthRefreshLockDir/legacyCredentialsLockDir. If a live Claude Code process is concurrently refreshing the same account's token (per ccLock.ts's own docstring, this is the scenario the locks exist to prevent), both processes can call the refresh endpoint against the same one-time refresh token; whichever write lands last determines whether Claude Code ends up with a live, working token or a dead one, with no lock to make the interleaving safe."
+    },
+    {
+      "severity": "P1",
+      "file": "src/accounts/manager.ts",
+      "line": 335,
+      "summary": "pollOne's writeActive/clearManagedKey call (via writeActive -> writeOAuth/clearManagedKey -> updateGlobalConfig) can throw, and readOne/readUsage have no try/catch around it, so one account's background credential-write failure aborts quota reporting for every other managed account in that call.",
+      "failure_scenario": "During a routine background poll, the active account's token is refreshed and pollOne attempts `await this.credentials.writeActive(credential)`. writeActive() -> clearManagedKey() -> updateGlobalConfig() throws if Claude Code's global config file exists but fails to parse (a deliberately-thrown safety refusal elsewhere in credentials.ts). Because readOne() awaits pollOne() with no surrounding try/catch, and readUsage()'s for-loop has none either, this exception propagates out of manager.readUsage() entirely. The daemon tick (or `rotorcc accounts list`, `doctor`, `predict`) fails outright for every account in that pass instead of reporting a per-account credential-problem, and \u2014 because writeStash already persisted the new refresh token before this point \u2014 Claude Code's live credential may now hold a refresh token that was already spent, with no per-account error surfaced to explain it."
+    },
+    {
+      "severity": "P1",
+      "file": "src/core/workload.ts",
+      "line": 61,
+      "summary": "collectWorkload's catch-block placeholder for a project whose git trees could not be discovered sets protectedBranch/midOperation/noRemote to false, so it is classified as \"savable\" rather than \"needs human\", contradicting the function's own comment and weakening the rotation-safety refusal.",
+      "failure_scenario": "discoverTrees() throws for a project (transient git error, permission issue, corrupted repo). The catch block pushes `{ project, tree: project.path, branch: '(unknown)', unpushedCommits: null, dirtyFiles: 0, protectedBranch: false, midOperation: null, noRemote: false }` into `unsaved`, with a comment claiming this is \"recorded as a tree that needs a human\". But `needsHuman` is computed as `unsaved.filter(t => t.protectedBranch || t.midOperation !== null || t.noRemote)` \u2014 none of which are true for this entry \u2014 so it lands in `savable` instead. assessRotationSafety() then returns 'save-first' rather than 'refuse', and applyWorkAwareGate() in daemon.ts only blocks rotation on a 'refuse' verdict, so a rotation can proceed past a project whose actual git state (protected branch? mid-rebase? no remote?) was never actually verified."
+    },
+    {
+      "severity": "P1",
+      "file": "src/commands/runAs.ts",
+      "line": 135,
+      "summary": "The temp CLAUDE_CONFIG_DIR holding a plaintext credential is only cleaned up via a try/finally around the async function body, which does not run if the parent rotorcc process is terminated by SIGINT/SIGTERM \u2014 contradicting the file's own docstring claim that cleanup happens \"on every exit path, including a signal\".",
+      "failure_scenario": "An operator runs `rotorcc run <account> -- claude -p \"long task\"` and presses Ctrl+C. SIGINT is delivered to the foreground process group, including the rotorcc parent process. Node's default SIGINT handling terminates the process immediately unless a handler is registered (none is visible in this file); the in-flight `finally { rmSync(home, ...) }` cleanup in runAsAccount does not get a chance to run. The mkdtemp'd directory containing `.credentials.json` (mode 0600, but an unencrypted, real OAuth credential) is left behind in the OS temp directory indefinitely."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/daemon.ts",
+      "line": 410,
+      "summary": "applyWorkAwareGate's rotation-refusal path claims to reset nextState so \"the rotation did not happen\" is recorded, but the code spreads decision.nextState and then reassigns lastRotationAt/lastRotationTarget to the exact same values, which is a no-op that does not undo whatever decide() already set.",
+      "failure_scenario": "decide() (unchanged, pre-existing) computes decision.nextState optimistically assuming the proposed rotation will happen, setting lastRotationAt/lastRotationTarget. applyWorkAwareGate then detects unsaved-and-unsavable work and refuses the rotation, but its `nextState: { ...decision.nextState, lastRotationAt: decision.nextState.lastRotationAt, lastRotationTarget: decision.nextState.lastRotationTarget }` merely copies the same tainted values through unchanged instead of clearing them. If downstream logic (cooldowns, \"already rotated recently\" checks) reads lastRotationAt/lastRotationTarget from persisted state, it can believe a rotation just occurred when it was actually refused."
+    },
+    {
+      "severity": "P2",
+      "file": "src/accounts/credentials.ts",
+      "line": 565,
+      "summary": "CredentialStore.writeStash's \".prev\" recovery cushion is only created when a plaintext stash file already exists at the target path, but a successful keychain write deletes that file \u2014 so on macOS, once the keychain becomes the active backend, no previous-generation backup is ever taken again on subsequent refreshes.",
+      "failure_scenario": "On a working macOS keychain, writeStash always deletes the stash file after a successful setPassword() (\"the file must go or a file-wins read would serve ... an older generation\"). The next time writeStash runs for that slot (e.g. after a token refresh), `existsSync(path)` is false, so the `.prev` backup block is skipped entirely \u2014 the very safety net the docstring describes (\"the recovery cushion for the case rotorcc cannot rule out: a credential that turns out to have been mid-rotation when we captured it\") never activates on the platform it is presumably most exercised on, silently leaving zero recovery copy if a captured credential turns out to be a superseded generation."
+    },
+    {
+      "severity": "P2",
+      "file": "src/accounts/keychain.ts",
+      "line": 128,
+      "summary": "setPassword's stdin-based hex delivery to `security add-generic-password -X` is unverified: the macOS security CLI is not documented to read -X's value from stdin, so this may prompt on a controlling TTY or fail instead of accepting the piped value, silently degrading every macOS keychain write to the file fallback.",
+      "failure_scenario": "setPassword spawns `security add-generic-password -U -s <service> -a <account> -X` with no inline value and writes the hex-encoded secret to the child's stdin. If the `security` binary does not actually consume stdin for a value-less `-X`/`-w` (behavior that varies by macOS version and is not documented as stdin-driven), the call either hangs waiting on a controlling terminal until the 10s timeout fires, or exits with an unrelated error. Every writeOAuth/writeManagedKey/writeStash call on macOS would then always fall through to the file-based fallback path, silently defeating the intended keychain-first design without ever surfacing as a distinct, diagnosable failure."
+    },
+    {
+      "severity": "P2",
+      "file": "src/commands/accounts.ts",
+      "line": 545,
+      "summary": "swapAccounts performs its credential-stash moves and roster update as a sequence of independent awaited calls with no lock and no rollback (unlike switchAccount's undo stack), so a mid-sequence failure can leave orphaned stash files whose slot/email no longer matches the roster.",
+      "failure_scenario": "swapAccounts writes the two stashes to their new (slot, email) locations, then deletes the two old ones, then updates the roster. If the second writeStash call throws (disk error, ENOSPC) after the first succeeded, the function throws with no catch: slot b now has an extra `b-<emailA>.cred` file on disk that the roster (still unmodified) has no knowledge of, since roster.update() never runs. The operator sees a command failure but the accounts directory is left in a state with an orphaned credential file that no `accounts list`/`switch` path will ever reference or clean up on its own."
+    }
+  ],
+  "blocking": true,
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "note": "Codex subscription ended; per docs/operations/BLIND-CRITIC-FALLBACK.md a fresh context received ONLY the source diff plus the review contract \u2014 no plan, no reasoning, no test results, no authorship. This is a weaker independence guarantee than a different vendor and the record says so.",
+  "base": "885e1a3",
+  "scope": "src/ only (accounts, core, commands); tests and docs excluded from the review input",
+  "triage": "all 9 findings accepted as real and fixed in e3a0c2c; 0 refuted",
+  "blockingResolved": true
+}

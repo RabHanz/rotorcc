@@ -53,6 +53,15 @@ export interface RotorState {
   lastSnapshotAt: string | null;
   lastManifestPath: string | null;
   lastLevel: Level;
+  /**
+   * The weekly-priority policy's own latch.
+   *
+   * Separate from `latches` because it answers a different question: those
+   * track threshold crossings on the binding window, this tracks whether the
+   * policy has already acted for the current window. Sharing one would make a
+   * 5-hour warning clear the record of a weekly handover.
+   */
+  policyLatch?: { windowKey: string; at: string } | undefined;
   /** Sessions rotorcc has seen end cleanly, newest first. */
   cleanExits: Array<{ sessionId: string; at: string }>;
   /** Sessions rotorcc last saw alive, for crash detection on next start. */

@@ -255,6 +255,22 @@ export const configSchema = z.object({
     })
     .default({}),
 
+  /**
+   * The WEEKLY handover point, in headroom remaining.
+   *
+   * The weekly window is the priority signal, not the 5-hour one. The 5-hour
+   * window refills several times a day, so burning a second account's week to
+   * escape it is a bad trade; the weekly budget is the one an operator actually
+   * regrets spending early. At or below this, rotorcc records that the NEXT
+   * session should open on a different account.
+   *
+   * 5 means "hand over when 5% of the week is left", i.e. 95% utilised.
+   */
+  weeklyRotatePct: pct.default(5),
+
+  /** Warn (do not act) once weekly headroom falls to this. */
+  weeklyWarnPct: pct.default(20),
+
   /** Refuse to rotate unless some other account has at least this much left. */
   minTargetHeadroomPct: pct.default(20),
   /** Headroom must climb this far above a threshold before its latch resets. */

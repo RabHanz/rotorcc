@@ -25,6 +25,10 @@ import { parseManifest } from '../core/manifest.js';
 import { appPaths } from '../core/paths.js';
 import { type HookPayload, parseHookPayload, renderHookResponse } from '../core/hookPayload.js';
 import { FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, Store } from '../core/state.js';
+import { PendingSwitchStore } from '../core/nextSession.js';
+import { managerFor } from '../core/daemon.js';
+import { resolveIdentifier } from '../accounts/roster.js';
+import { switchAccount } from '../accounts/switch.js';
 
 export interface HookOptions {
   event: string;
@@ -163,6 +167,70 @@ function flagContext(store: Store): { additionalContext: string; systemMessage: 
   return null;
 }
 
+/**
+ * Apply a pending account handover, before the session reads its credential.
+ *
+ * Returns a message for the operator when something happened, null when there
+ * was nothing to do. A failure is reported and swallowed: a hook must never
+ * block a session from starting, and starting on the previous account is a far
+ * better outcome than not starting at all.
+ */
+async function applyPendingSwitch(
+  config: Config,
+  store: Store,
+  logger: Logger,
+): Promise<string | null> {
+  const pending = new PendingSwitchStore(store.dir);
+  const intent = pending.consume();
+  if (intent === null) return null;
+
+  try {
+    const manager = managerFor(config);
+    if (!manager.hasAccounts()) return null;
+
+    const resolved = resolveIdentifier(manager.roster.read(), String(intent.slot));
+    if (resolved.kind !== 'found') {
+      logger.warn('pending handover names a slot that is no longer in the roster', {
+        slot: intent.slot,
+      });
+      return null;
+    }
+
+    // Already there — someone switched by hand, or a previous start applied it.
+    const detected = await manager.detectActiveSlot();
+    if (detected.slot === intent.slot) {
+      logger.info('pending handover was already satisfied', { slot: intent.slot });
+      return null;
+    }
+
+    const result = await switchAccount({
+      roster: manager.roster,
+      credentials: manager.credentials,
+      target: resolved.slot,
+    });
+    for (const warning of result.warnings) logger.warn(`handover: ${warning}`);
+
+    if (!result.ok) {
+      logger.error('pending handover failed; this session keeps the previous account', {
+        detail: result.detail,
+      });
+      return `rotorcc: could not switch account for this session — ${result.detail}`;
+    }
+
+    logger.info('handed over to a fresh account at session start', {
+      slot: intent.slot,
+      reason: intent.reason,
+    });
+    return (
+      `rotorcc: this session opened on slot ${intent.slot} — ${intent.reason} ` +
+      '(switched before the session started, so nothing was interrupted)'
+    );
+  } catch (err) {
+    logger.error('pending handover threw', { detail: String(err).slice(0, 200) });
+    return null;
+  }
+}
+
 function resumeContext(store: Store): string | null {
   const state = store.readState();
   const manifestPath = store.latestManifest();
@@ -293,6 +361,21 @@ export async function runHook(options: HookOptions): Promise<HookResult> {
   // --- the synchronous half: small reads only ---------------------------
   let additionalContext: string | undefined;
   let systemMessage: string | undefined;
+
+  // SessionStart is where rotation is SUPPOSED to happen.
+  //
+  // The account a session runs on is fixed the moment the process launches, so
+  // the only place a switch costs nothing is before that. Doing it here means:
+  // no interruption of live work, no successor process, and no way to end up
+  // with two sessions on one worktree — which is what the old
+  // checkpoint-switch-and-spawn model produced on 2026-08-19.
+  //
+  // It runs synchronously and before anything else in the hook, because by the
+  // time the detached half runs the session has already read its credential.
+  if (event === 'SessionStart') {
+    const applied = await applyPendingSwitch(config, store, logger);
+    if (applied !== null) systemMessage = applied;
+  }
 
   if (event === 'SessionStart' || event === 'UserPromptSubmit') {
     const flags = flagContext(store);

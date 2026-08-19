@@ -23,7 +23,14 @@ import { emptyState } from '../src/core/decide.js';
 import { Logger } from '../src/core/log.js';
 import { parseManifest } from '../src/core/manifest.js';
 import { projectSlug } from '../src/core/paths.js';
-import { FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, Store } from '../src/core/state.js';
+import {
+  FLAG_ALL_EXHAUSTED,
+  FLAG_ROTATE_NOW,
+  FLAG_SOFT_CHECKPOINT,
+  Store,
+} from '../src/core/state.js';
+import { PendingSwitchStore } from '../src/core/nextSession.js';
+import { renderStopNotice } from '../src/core/policy.js';
 import { cleanup, tempDir } from './helpers.js';
 
 let root: string;
@@ -68,19 +75,34 @@ process.exit(0);
   );
 }
 
-function setUsage(statePath: string, headroom: Record<number, number>, active: number): void {
-  const accounts = Object.entries(headroom).map(([number, pct]) => ({
-    number: Number(number),
-    email: `a${number}@example.com`,
-    alias: `a${number}`,
-    active: Number(number) === active,
-    usageStatus: 'ok',
-    usage: {
-      fiveHour: { pct: 100 - pct, resetsAt: '2026-08-18T05:00:00+00:00' },
-      sevenDay: { pct: 0, resetsAt: '2026-08-24T05:00:00+00:00' },
-      scoped: [{ pct: 0, name: 'Fable', resetsAt: '2026-08-24T05:00:00+00:00' }],
-    },
-  }));
+/**
+ * Set each account's headroom.
+ *
+ * A number is headroom on BOTH windows, which is the common case and keeps the
+ * older tests readable. A pair sets them independently, which the weekly-priority
+ * policy makes necessary: "5 hours nearly gone, week fine" and "week nearly
+ * gone" are now completely different situations and a test that cannot express
+ * the difference cannot test the policy.
+ */
+type Headroom = number | { fiveHour: number; sevenDay: number };
+
+function setUsage(statePath: string, headroom: Record<number, Headroom>, active: number): void {
+  const accounts = Object.entries(headroom).map(([number, value]) => {
+    const fiveHour = typeof value === 'number' ? value : value.fiveHour;
+    const sevenDay = typeof value === 'number' ? value : value.sevenDay;
+    return {
+      number: Number(number),
+      email: `a${number}@example.com`,
+      alias: `a${number}`,
+      active: Number(number) === active,
+      usageStatus: 'ok',
+      usage: {
+        fiveHour: { pct: 100 - fiveHour, resetsAt: '2026-08-18T05:00:00+00:00' },
+        sevenDay: { pct: 100 - sevenDay, resetsAt: '2026-08-24T05:00:00+00:00' },
+        scoped: [{ pct: 0, name: 'Fable', resetsAt: '2026-08-24T05:00:00+00:00' }],
+      },
+    };
+  });
   writeFileSync(
     statePath,
     JSON.stringify({ schemaVersion: 1, activeAccountNumber: active, accounts }, null, 2),
@@ -255,65 +277,128 @@ describe('end to end', () => {
     expect(third.snapshot?.filesCopied).toBeGreaterThan(0);
   });
 
-  it('at the soft threshold: checkpoints the lane, raises the flag, does not switch', async () => {
-    setUsage(usageState, { 1: 8, 2: 90, 3: 95 }, 1);
+  it('5-hour window low but the WEEK healthy: checkpoints and stays put', async () => {
+    // The weekly-priority rule. The 5h window refills several times a day, so
+    // burning a second account's WEEK to escape it is a bad trade. rotorcc
+    // saves everything and waits for the window instead.
+    setUsage(usageState, { 1: { fiveHour: 8, sevenDay: 90 }, 2: 90, 3: 95 }, 1);
     const result = await tick(ctx());
 
-    expect(result.decision?.level).toBe('soft');
-    expect(result.actionsTaken).toContain('soft-checkpoint');
+    expect(result.actionsTaken).toContain('policy-checkpoint');
+    expect(result.detail).toContain('weekly window is healthy');
 
     const worktree = join(repo, '.claude', 'worktrees', 'agent-1');
     expect(git(worktree, 'status', '--porcelain').trim()).toBe('');
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain(
-      'auto-checkpoint soft-checkpoint',
-    );
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
 
-    const flag = store.readFlag(FLAG_SOFT_CHECKPOINT);
-    expect(flag).not.toBeNull();
-    expect(flag?.reason).toContain('commit, push');
-    expect(store.readFlag(FLAG_ROTATE_NOW)).toBeNull();
+    // Nothing was queued and nothing was switched.
+    expect(new PendingSwitchStore(store.dir).peek()).toBeNull();
     expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
   });
 
-  it('at the rotate threshold: writes a manifest, raises the flag, switches account', async () => {
-    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
+  it('WEEKLY window low: queues a handover and never interrupts the running session', async () => {
+    // The redesign, 2026-08-19. This test previously asserted the model that
+    // corrupted a live session: checkpoint, switch the credential underneath a
+    // running process, and spawn a `claude --continue` beside it. A live session
+    // reads its credential once at launch and cannot be hot-swapped, so that
+    // was abandon-and-replace, and it put two operators on one worktree.
+    //
+    // Now: record which account the NEXT session opens on, checkpoint, and
+    // leave the running one entirely alone.
+    setUsage(usageState, { 1: { fiveHour: 60, sevenDay: 3 }, 2: 40, 3: 95 }, 1);
     const result = await tick(ctx());
 
-    expect(result.decision?.level).toBe('rotate');
-    expect(result.actionsTaken).toContain('manifest');
-    expect(result.actionsTaken).toContain('switched:3');
-    expect(cswapCalls()).toContainEqual(['switch', '3']);
+    expect(result.actionsTaken).toContain('handover-queued');
+    // The critical assertion: no switch, and nothing spawned.
+    expect(result.actionsTaken.some((a) => a.startsWith('switched'))).toBe(false);
+    expect(result.actionsTaken.some((a) => a.startsWith('successor'))).toBe(false);
+    expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
 
-    const manifestPath = store.latestManifest();
-    expect(manifestPath).not.toBeNull();
-    const manifest = parseManifest(JSON.parse(readFileSync(manifestPath ?? '', 'utf8')));
-    expect(manifest.trigger).toBe('rotate');
-    expect(manifest.accounts.targetNumber).toBe(3);
-    expect(manifest.cleanExit).toBe(false);
+    const pending = new PendingSwitchStore(store.dir).peek();
+    expect(pending?.slot).toBe(3);
+    expect(pending?.reason).toContain('next session will open on');
+    expect(pending?.expiresAt).toBeDefined();
 
-    const lane = manifest.projects[0]?.trees.find((t) => t.branch === 'work/agent-1');
-    expect(lane?.checkpoint?.pushed).toBe(true);
-    expect(lane?.notes).toContain('checkpoint-agent-1.md');
-
-    const markdown = readFileSync((manifestPath ?? '').replace(/\.json$/, '.md'), 'utf8');
-    expect(markdown).toContain('work/agent-1');
-    expect(markdown).toContain('Do this first');
-
-    const flag = store.readFlag(FLAG_ROTATE_NOW);
-    expect(flag?.targetAccount).toBe(3);
-    expect(flag?.manifestMarkdownPath).toBeDefined();
+    // And the work is safe in the meantime, because this session keeps running
+    // on an account that is nearly out.
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
   });
 
-  it('refuses to rotate when every other account is spent, and checkpoints instead', async () => {
+  it('picks the account with the most WEEKLY headroom, not the most 5-hour', async () => {
+    // #2 looks best on the 5h window and is nearly out of week; #3 is the
+    // opposite. The next session should open on #3.
+    setUsage(
+      usageState,
+      {
+        1: { fiveHour: 50, sevenDay: 2 },
+        2: { fiveHour: 99, sevenDay: 6 },
+        3: { fiveHour: 30, sevenDay: 80 },
+      },
+      1,
+    );
+    await tick(ctx());
+    expect(new PendingSwitchStore(store.dir).peek()?.slot).toBe(3);
+  });
+
+  it('ALL accounts out of weekly quota: STOPS, spawns nothing, queues nothing', async () => {
     setUsage(usageState, { 1: 3, 2: 4, 3: 2 }, 1);
     const result = await tick(ctx());
 
+    expect(result.actionsTaken).toContain('policy-stop');
+    expect(result.decision?.reason).toContain('STOPPED');
+
+    // Nothing was rotated, nothing spawned, and — the part that matters —
+    // nothing was QUEUED either. A handover to an exhausted account would just
+    // move the problem to the next session start.
     expect(result.actionsTaken.some((a) => a.startsWith('switched'))).toBe(false);
-    expect(result.actionsTaken.some((a) => a.includes('no account has'))).toBe(true);
-    expect(result.actionsTaken).toContain('soft-checkpoint');
+    expect(result.actionsTaken.some((a) => a.startsWith('successor'))).toBe(false);
+    expect(new PendingSwitchStore(store.dir).peek()).toBeNull();
     expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
-    // the work is still safe
+
+    // The operator is told, unmistakably, on a flag of its own.
+    const flag = store.readFlag(FLAG_ALL_EXHAUSTED);
+    expect(flag).not.toBeNull();
+    expect(flag?.reason).toContain('every account is at or below');
+
+    // A manifest is still written and the work is still pushed: stopping is not
+    // the same as giving up on durability.
+    expect(store.latestManifest()).not.toBeNull();
     expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+  });
+
+  it('the stop notice names every account, its headroom and its reset time', () => {
+    const notice = renderStopNotice({
+      kind: 'stop',
+      reason: 'every account is at or below 5% weekly headroom.',
+      accounts: [
+        {
+          slot: 1,
+          label: 'work',
+          headroomPct: 2,
+          window: '7d',
+          resetsAt: '2026-08-24T09:00:00Z',
+          why: 'the account in use',
+        },
+        {
+          slot: 2,
+          label: 'spare',
+          headroomPct: null,
+          window: 'unknown',
+          resetsAt: null,
+          why: 'quota read failed: http-429',
+        },
+      ],
+    });
+
+    expect(notice).toContain('rotorcc has STOPPED');
+    expect(notice).toContain('No rotation was performed');
+    expect(notice).toContain('2026-08-24 09:00');
+    // An account that could not be measured says so rather than being omitted:
+    // "we could not read this" and "this is empty" mean different things, and
+    // only one of them means waiting will help.
+    expect(notice).toContain('unknown');
+    expect(notice).toContain('http-429');
+    expect(notice).toContain('rotorcc accounts add');
   });
 
   it('does NOT treat a limit message as a hard kill while the session is alive', async () => {
@@ -341,22 +426,36 @@ describe('end to end', () => {
     const before = git(worktree, 'rev-parse', 'HEAD');
 
     const result = await tick(ctx(true));
-    expect(result.decision?.level).toBe('rotate');
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(before);
     expect(git(worktree, 'status', '--porcelain')).toContain('in-progress.ts');
     expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
-    expect(result.actionsTaken).toContain('dry-run-switch:3');
+    expect(result.actionsTaken).toContain('dry-run-handover-queued');
 
-    // The manifest is still WRITTEN — a plan costs nothing and is the point of
-    // a dry run. But it must not become the rescue record.
+    // A simulated handover must not be actionable either. The pending intent
+    // is written so the dry run can be inspected, but it carries `dryRun` and
+    // `consume()` refuses it — a simulation cannot decide which account a real
+    // session opens on.
+    const pending = new PendingSwitchStore(store.dir);
+    expect(pending.peek()?.dryRun).toBe(true);
+    expect(pending.consume()).toBeNull();
+
+    // A handover writes no manifest, in a dry run or otherwise: nothing is
+    // ending, so there is no resume plan to write.
+    expect(store.latestManifest()).toBeNull();
+  });
+
+  it('a dry-run STOP writes its manifest where no resume path will read it', async () => {
+    // The 2026-08-18 defect: a simulated run's manifest, every row of which read
+    // "would commit 345 file(s)", was surfaced by the resume banner as a rescue
+    // record while thirteen trees sat unpushed for twenty hours.
     //
-    // This assertion was inverted until 2026-08-19. It used to require
-    // `latestManifest()` to be non-null after a dry run, which is precisely
-    // the production defect of 2026-08-18: a simulated rotation's manifest,
-    // every row of which read "would commit 345 file(s)", was surfaced by the
-    // resume banner as a rescue record while thirteen trees sat unpushed for
-    // twenty hours. A dry run must be unable to produce a document that any
-    // resume path will read.
+    // The stop path is the one that still writes a manifest, so this is where
+    // that regression lives now.
+    setUsage(usageState, { 1: 3, 2: 4, 3: 2 }, 1);
+    const result = await tick(ctx(true));
+    expect(result.actionsTaken).toContain('policy-stop');
+
+    // Not reachable by `resume`, or by the crash-reconstruction hook.
     expect(store.latestManifest()).toBeNull();
 
     const dryRunDir = join(root, 'state', 'manifests', 'dry-run');
@@ -366,6 +465,9 @@ describe('end to end', () => {
     const markdown = readFileSync(join(dryRunDir, simulated[0] as string), 'utf8');
     expect(markdown).toContain('DRY RUN — NOTHING IN THIS DOCUMENT WAS ACTUALLY DONE');
     expect(markdown).toContain('Do not treat this as a rescue record');
+
+    // And a dry run does not raise the exhausted flag either.
+    expect(store.peekFlag(FLAG_ALL_EXHAUSTED)).toBeNull();
   });
 
   it('a dry run never raises a flag a live session would obey', async () => {
@@ -375,18 +477,28 @@ describe('end to end', () => {
     setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
     const result = await tick(ctx(true));
 
-    expect(result.decision?.level).toBe('rotate');
-    expect(result.actionsTaken).toContain('dry-run-flag-suppressed');
+    expect(result.actionsTaken).toContain('dry-run-handover-queued');
     expect(store.readFlag(FLAG_ROTATE_NOW)).toBeNull();
     expect(store.readFlag(FLAG_SOFT_CHECKPOINT)).toBeNull();
+    expect(store.readFlag(FLAG_ALL_EXHAUSTED)).toBeNull();
     // Not merely filtered on read — not on disk at all.
     expect(store.peekFlag(FLAG_ROTATE_NOW)).toBeNull();
   });
 
-  it('drops a raised flag once the level that justified it stops holding', async () => {
-    // A real rotation raises a real flag.
-    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
-    await tick(ctx());
+  it('drops a raised flag once the level that justified it stops holding', () => {
+    // Driven through the Store directly rather than through a tick.
+    //
+    // The weekly-priority redesign means the watcher no longer raises
+    // ROTATE_NOW under a live session — it queues a handover instead. But the
+    // flag still exists for the dead-session path, and its expiry semantics
+    // are what the 2026-08-18 defect was about, so they get pinned at the
+    // level that actually owns them.
+    store.raiseFlag(FLAG_ROTATE_NOW, {
+      raisedAt: new Date().toISOString(),
+      level: 'rotate',
+      reason: 'a real rotation happened',
+      targetAccount: 3,
+    });
     expect(store.readFlag(FLAG_ROTATE_NOW)).not.toBeNull();
 
     // The window resets and the account is healthy again. The flag now
@@ -396,11 +508,13 @@ describe('end to end', () => {
     expect(store.peekFlag(FLAG_ROTATE_NOW)).toBeNull();
   });
 
-  it('drops a raised flag once its TTL has passed', async () => {
-    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
-    await tick(ctx());
-    const raised = store.peekFlag(FLAG_ROTATE_NOW);
-    expect(raised?.expiresAt).toBeDefined();
+  it('drops a raised flag once its TTL has passed', () => {
+    store.raiseFlag(FLAG_ROTATE_NOW, {
+      raisedAt: new Date().toISOString(),
+      level: 'rotate',
+      reason: 'a real rotation happened',
+    });
+    expect(store.peekFlag(FLAG_ROTATE_NOW)?.expiresAt).toBeDefined();
 
     // Still live a minute later.
     expect(store.readFlag(FLAG_ROTATE_NOW, { nowMs: Date.now() + 60_000 })).not.toBeNull();
@@ -410,15 +524,43 @@ describe('end to end', () => {
   });
 
   it('latches, so a stuck-at-low account is checkpointed once and not every minute', async () => {
-    setUsage(usageState, { 1: 8, 2: 90, 3: 95 }, 1);
+    // The policy path needs a latch just as much as the threshold path it
+    // replaced. A daemon that checkpoints on every tick while a window sits low
+    // is a commit and a push every sixty seconds for four hours — which is
+    // exactly what happened on a busy orchestrator on 2026-08-18.
+    setUsage(usageState, { 1: { fiveHour: 8, sevenDay: 90 }, 2: 90, 3: 95 }, 1);
     const first = await tick(ctx());
-    expect(first.actionsTaken).toContain('soft-checkpoint');
+    expect(first.actionsTaken).toContain('policy-checkpoint');
 
     const second = await tick(ctx());
     expect(second.actionsTaken).toEqual([]);
 
     const third = await tick(ctx());
     expect(third.actionsTaken).toEqual([]);
+  });
+
+  it('latches a queued handover too, so it is not re-queued every tick', async () => {
+    setUsage(usageState, { 1: { fiveHour: 60, sevenDay: 3 }, 2: 40, 3: 95 }, 1);
+    const first = await tick(ctx());
+    expect(first.actionsTaken).toContain('handover-queued');
+
+    const second = await tick(ctx());
+    expect(second.actionsTaken).toEqual([]);
+    // The intent itself survives — it is the repeated CHECKPOINT beside it that
+    // had to stop, not the decision.
+    expect(new PendingSwitchStore(store.dir).peek()?.slot).toBe(3);
+  });
+
+  it('gives the all-exhausted notice once per window, not every minute', async () => {
+    setUsage(usageState, { 1: 3, 2: 4, 3: 2 }, 1);
+    const first = await tick(ctx());
+    expect(first.actionsTaken).toContain('policy-stop');
+
+    // A full-screen stop banner every sixty seconds trains an operator to
+    // scroll past it, which defeats the one job it has.
+    const second = await tick(ctx());
+    expect(second.actionsTaken).toEqual([]);
+    expect(second.decision?.reason).toContain('notice already given');
   });
 
   it('refuses the off-machine mirror when the new transcript bytes look like a credential', async () => {
@@ -554,12 +696,19 @@ describe('end to end', () => {
     setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
 
     const result = await tick(ctx());
-    expect(result.decision?.level).toBe('rotate');
     expect(result.actionsTaken.some((a) => a.startsWith('switched'))).toBe(false);
-    expect(result.actionsTaken.some((a) => a.startsWith('dry-run-switch'))).toBe(false);
-    expect(result.actionsTaken.join(' ')).toContain('rotation is disabled');
-    expect(result.actionsTaken).toContain('soft-checkpoint');
+    expect(result.actionsTaken).toContain('policy-checkpoint');
+    expect(result.detail).toContain('rotation is disabled');
+    // It still NAMES the account a human should move to. Refusing to act is
+    // not a reason to refuse to inform.
+    expect(result.detail).toContain('slot 3');
     expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
+
+    // And — the part that would otherwise be a hole in the promise — it does
+    // not queue a handover either. An intent SessionStart would act on is still
+    // rotorcc changing the account by itself, just later.
+    expect(new PendingSwitchStore(store.dir).peek()).toBeNull();
+
     // The work is still safe, which is the part that actually matters.
     expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
   });
