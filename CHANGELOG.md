@@ -3,6 +3,47 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased — native account ownership
+
+rotorcc now owns its whole account layer: it stores its own logins, reads quota
+straight from Anthropic, and switches accounts itself. No external switcher is
+required, wrapped, or depended upon at runtime. See
+`docs/adr/0001-own-the-account-layer.md` for the ruling and what it rejects.
+
+### Added
+
+- Native account layer (`src/accounts/`): credential storage (macOS Keychain,
+  `~/.claude/.credentials.json`, `~/.claude.json`), a switch transaction with
+  rollback held inside Claude Code's own locks, quota reading from
+  `api.anthropic.com/api/oauth/usage` with a cache and poll floor, and OAuth
+  refresh with a one-time-token discipline.
+- `rotorcc accounts` (`list`/`add`/`add-token`/`remove`/`alias`/`disable`/
+  `enable`/`swap`/`move`/`import --from-cswap`/`export`), `rotorcc switch`,
+  `rotorcc run <ref> -- …`, `rotorcc map`/`unmap`.
+- `rotorcc tui` / `watch` — live terminal dashboard; `rotorcc predict` — burn
+  rate and time-to-threshold with stated confidence.
+- Work-aware rotation: refuses to rotate over work it cannot save, and refuses
+  a target too small to finish what is running (`strategy`,
+  `refuseRotationWithUnsavedWork`).
+- Predictive rotation (`src/core/burn.ts`) and a decision journal
+  (`src/core/history.ts`) that records every tick, idle ones included.
+- `doctor` upgraded; `THIRD-PARTY-NOTICES.md` crediting claude-swap (MIT).
+
+### Fixed — two 2026-08-18 defects the changelog claimed but never coded
+
+- A dry run raised a real `ROTATE_NOW` flag. Now dry runs raise nothing; flags
+  carry a level and a 30-minute TTL; `readFlag` deletes an expired or
+  level-invalid flag rather than filtering it.
+- A dry-run manifest landed in the real manifests directory and was read as a
+  rescue record. Now `Manifest.dryRun`, a separate `manifests/dry-run/`
+  directory, a banner, and never `state.lastManifestPath`.
+- The hook printed "0% headroom left" for a missing figure; it says "headroom
+  unknown" now.
+
+The rule, made structural: an unmeasured account reports `unknown` (null in
+JSON), never a number, everywhere. `headroomIsKnown()` is the one place that is
+decided; pinned by `test/unknown-is-unknown.test.ts`. 400 tests (was 238).
+
 ## [0.1.0] — unreleased
 
 First release.
