@@ -86,8 +86,26 @@ export interface AccountReading {
   email?: string | undefined;
   alias?: string | undefined;
   active: boolean;
-  /** Headroom in the binding (lowest) window. */
+  /**
+   * Headroom in the binding (lowest) window.
+   *
+   * ONLY MEANINGFUL WHEN `headroomKnown` IS TRUE. When it is false this is a
+   * placeholder zero — chosen because every decision path treats a low number
+   * as "do not send work here", so a placeholder that fails safe is the right
+   * one — and no surface may render it as a percentage. Ask `headroomIsKnown`
+   * rather than reading either field directly.
+   */
   headroomPct: number;
+  /**
+   * Whether `headroomPct` is a measurement or a placeholder.
+   *
+   * Optional so that readings built before this field existed still typecheck;
+   * `headroomIsKnown` falls back to `!stale`, which was the closest thing the
+   * older shape had to the same fact.
+   */
+  headroomKnown?: boolean;
+  /** Why headroom is unknown, in words an operator can act on. */
+  unknownReason?: string | undefined;
   /** The window that binds, i.e. the one with the least headroom. */
   bindingWindow: string;
   /** Reset time of the binding window, when known. */
@@ -95,13 +113,45 @@ export interface AccountReading {
   windows: WindowReading[];
   /** True when the source could not fetch usage for this account. */
   stale: boolean;
+  /** How old the underlying measurement is, or null when there is none. */
+  usageAgeMs?: number | null;
+  /** Held out of automatic rotation by the operator. Still an explicit target. */
+  disabled?: boolean;
+  /** `api-key` accounts bill per token and have no quota window. */
+  kind?: 'oauth' | 'api-key';
+  /** The last read error, when the number being shown predates it. */
+  lastReadError?: string;
+}
+
+/**
+ * Whether an account's headroom is a real measurement.
+ *
+ * The single place this question is answered. Reading `headroomPct` without
+ * asking here is how a placeholder becomes a number on a screen, which is the
+ * defect class rotorcc exists to not have.
+ */
+export function headroomIsKnown(account: AccountReading): boolean {
+  return account.headroomKnown ?? !account.stale;
 }
 
 export interface UsageReading {
   observedAt: string;
   activeAccountNumber: number | null;
   accounts: AccountReading[];
-  source: 'list' | 'auto';
+  /**
+   * Where the reading came from. `native` is rotorcc's own account store and
+   * the Anthropic quota endpoint; `list` and `auto` are the two shapes of the
+   * external switcher rotorcc used to depend on, kept so an operator who still
+   * has one configured is not cut off mid-migration.
+   */
+  source: 'list' | 'auto' | 'native';
+  /**
+   * How the active account was identified, when the source can say. rotorcc's
+   * native reader matches the live credential's fingerprint against each slot's
+   * stash, and reports plainly when that match fails — an unmanaged login is a
+   * fact an operator needs, not a reason to guess.
+   */
+  activeDetectionReason?: string;
   /**
    * Account numbers the switcher emitted in a shape we could not parse. They are
    * excluded from `accounts` but reported here so `status` and `doctor` can say
