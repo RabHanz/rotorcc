@@ -41,7 +41,7 @@ import { findUnclaimed, purgeUnclaimed } from '../accounts/unclaimed.js';
 import { claudeCredentialsPath, claudeGlobalConfigPath } from '../core/paths.js';
 import { selectTarget, type Strategy } from '../accounts/select.js';
 import { switchAccount } from '../accounts/switch.js';
-import { headroomIsKnown } from '../core/usage.js';
+import { formatUsed, headroomIsKnown, usedPctOf } from '../core/usage.js';
 import { formatAge } from '../accounts/manager.js';
 
 export interface AccountsContext {
@@ -71,9 +71,20 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
             active: a.active,
             disabled: a.disabled ?? false,
             kind: a.kind ?? 'oauth',
+            // Both figures, both named, neither inverted in place.
+            //
+            // `usedPct` is the convention every human surface now uses, and the
+            // one Anthropic's API and Claude Code's status line report in.
+            // `headroomPct` stays, unchanged in meaning, because silently
+            // inverting a field while keeping its name would make an existing
+            // consumer read 99 as "healthy" when it means "nearly gone" — a
+            // worse outcome than either convention on its own.
+            //
             // null, never 0. A consumer that sees 0 will treat it as exhausted.
+            usedPct: usedPctOf(a),
             headroomPct: headroomIsKnown(a) ? a.headroomPct : null,
             headroomKnown: headroomIsKnown(a),
+            window: headroomIsKnown(a) ? a.bindingWindow : null,
             unknownReason: headroomIsKnown(a) ? null : (a.unknownReason ?? 'not measured'),
             bindingWindow: headroomIsKnown(a) ? a.bindingWindow : null,
             bindingResetsAt: a.bindingResetsAt ?? null,
@@ -129,8 +140,7 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
         : ` · ${formatAge(account.usageAgeMs)} old`;
     ctx.out(
       `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
-        `${`${account.headroomPct.toFixed(0)}% left`.padEnd(10)} ` +
-        `(${account.bindingWindow})${resets}${age}${tags}`,
+        `${formatUsed(account).padEnd(20)}${resets}${age}${tags}`,
     );
   }
 

@@ -25,7 +25,12 @@
  */
 import { type BurnRate, type Prediction, formatDuration } from '../core/burn.js';
 import type { DecisionEntry } from '../core/history.js';
-import { type AccountReading, type UsageReading, headroomIsKnown } from '../core/usage.js';
+import {
+  type AccountReading,
+  type UsageReading,
+  headroomIsKnown,
+  usedPctOf,
+} from '../core/usage.js';
 import type { RotationSafety, WorkloadSnapshot } from '../core/workload.js';
 import { type Palette, padVisible, truncateVisible, visibleWidth } from './theme.js';
 
@@ -125,7 +130,8 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     }
     push(
       `  ${c.dim(
-        `thresholds: warn ${model.thresholds.warnPct}% · soft ${model.thresholds.softPct}% · rotate ${model.thresholds.rotatePct}%`,
+        `thresholds: warn at ${100 - model.thresholds.warnPct}% used · ` +
+          `soft at ${100 - model.thresholds.softPct}% · rotate at ${100 - model.thresholds.rotatePct}%`,
       )}`,
     );
   }
@@ -279,7 +285,11 @@ function accountLines(account: AccountReading, model: DashboardModel, c: Palette
       : account.headroomPct <= model.thresholds.warnPct
         ? c.warn
         : c.good;
-  const meter = `${bar(account.headroomPct)} ${level(`${account.headroomPct.toFixed(0).padStart(3)}%`)}`;
+  // Used, not remaining, and the window is printed beside it below. The bar
+  // fills as the window is spent, which is the direction every other quota
+  // display an operator looks at moves in.
+  const used = usedPctOf(account) ?? 0;
+  const meter = `${bar(used)} ${level(`${used.toFixed(0).padStart(3)}% used`)}`;
   const resets =
     account.bindingResetsAt === undefined
       ? c.dim('reset unknown')
@@ -364,8 +374,9 @@ function decisionLine(entry: DecisionEntry, c: Palette): string {
  * an empty bar and a bar for an account at 0% are visually identical and one of
  * those is a measurement.
  */
-export function bar(headroomPct: number, width = 16): string {
-  const filled = Math.max(0, Math.min(width, Math.round((headroomPct / 100) * width)));
+/** A bar that fills as the window is SPENT. Never drawn for an unknown. */
+export function bar(usedPct: number, width = 16): string {
+  const filled = Math.max(0, Math.min(width, Math.round((usedPct / 100) * width)));
   return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`;
 }
 
