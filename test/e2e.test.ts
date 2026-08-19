@@ -338,8 +338,67 @@ describe('end to end', () => {
     expect(git(worktree, 'status', '--porcelain')).toContain('in-progress.ts');
     expect(cswapCalls().every((call) => call[0] !== 'switch')).toBe(true);
     expect(result.actionsTaken).toContain('dry-run-switch:3');
-    // the manifest is still written: a plan costs nothing and is the point
-    expect(store.latestManifest()).not.toBeNull();
+
+    // The manifest is still WRITTEN — a plan costs nothing and is the point of
+    // a dry run. But it must not become the rescue record.
+    //
+    // This assertion was inverted until 2026-08-19. It used to require
+    // `latestManifest()` to be non-null after a dry run, which is precisely
+    // the production defect of 2026-08-18: a simulated rotation's manifest,
+    // every row of which read "would commit 345 file(s)", was surfaced by the
+    // resume banner as a rescue record while thirteen trees sat unpushed for
+    // twenty hours. A dry run must be unable to produce a document that any
+    // resume path will read.
+    expect(store.latestManifest()).toBeNull();
+
+    const dryRunDir = join(root, 'state', 'manifests', 'dry-run');
+    expect(existsSync(dryRunDir)).toBe(true);
+    const simulated = readdirSync(dryRunDir).filter((f) => f.endsWith('.md'));
+    expect(simulated.length).toBeGreaterThan(0);
+    const markdown = readFileSync(join(dryRunDir, simulated[0] as string), 'utf8');
+    expect(markdown).toContain('DRY RUN — NOTHING IN THIS DOCUMENT WAS ACTUALLY DONE');
+    expect(markdown).toContain('Do not treat this as a rescue record');
+  });
+
+  it('a dry run never raises a flag a live session would obey', async () => {
+    // The 2026-08-18 defect in its other half: a ROTATE_NOW written by a dry
+    // run survived on disk and was handed to a healthy live session hours
+    // later, which was told to stop dispatching work and exit.
+    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
+    const result = await tick(ctx(true));
+
+    expect(result.decision?.level).toBe('rotate');
+    expect(result.actionsTaken).toContain('dry-run-flag-suppressed');
+    expect(store.readFlag(FLAG_ROTATE_NOW)).toBeNull();
+    expect(store.readFlag(FLAG_SOFT_CHECKPOINT)).toBeNull();
+    // Not merely filtered on read — not on disk at all.
+    expect(store.peekFlag(FLAG_ROTATE_NOW)).toBeNull();
+  });
+
+  it('drops a raised flag once the level that justified it stops holding', async () => {
+    // A real rotation raises a real flag.
+    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
+    await tick(ctx());
+    expect(store.readFlag(FLAG_ROTATE_NOW)).not.toBeNull();
+
+    // The window resets and the account is healthy again. The flag now
+    // describes a world that no longer exists, and a reader that supplies the
+    // current level must not be handed it.
+    expect(store.readFlag(FLAG_ROTATE_NOW, { currentLevel: 'ok' })).toBeNull();
+    expect(store.peekFlag(FLAG_ROTATE_NOW)).toBeNull();
+  });
+
+  it('drops a raised flag once its TTL has passed', async () => {
+    setUsage(usageState, { 1: 3, 2: 40, 3: 95 }, 1);
+    await tick(ctx());
+    const raised = store.peekFlag(FLAG_ROTATE_NOW);
+    expect(raised?.expiresAt).toBeDefined();
+
+    // Still live a minute later.
+    expect(store.readFlag(FLAG_ROTATE_NOW, { nowMs: Date.now() + 60_000 })).not.toBeNull();
+    // Gone an hour later. A rotation signal is about right now; one that
+    // survives for hours is not stale information, it is wrong information.
+    expect(store.readFlag(FLAG_ROTATE_NOW, { nowMs: Date.now() + 3_600_000 })).toBeNull();
   });
 
   it('latches, so a stuck-at-low account is checkpointed once and not every minute', async () => {

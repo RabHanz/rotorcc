@@ -206,8 +206,18 @@ async function runActions(
             2,
           )}\n`,
         );
+        if (ctx.dryRun) {
+          // Same rule as ROTATE_NOW. A simulated checkpoint request that
+          // reaches a live session is a false instruction, not a harmless note.
+          logger.info('dry run: would raise SOFT_CHECKPOINT_REQUESTED');
+          taken.push('dry-run-flag-suppressed');
+          effects.checkpointed = true;
+          taken.push('soft-checkpoint');
+          break;
+        }
         store.raiseFlag(FLAG_SOFT_CHECKPOINT, {
           raisedAt: new Date().toISOString(),
+          level: 'soft',
           reason:
             `Account headroom is down to ${decision.headroomPct.toFixed(0)}% on the ` +
             `${decision.bindingWindow} window. rotorcc has already committed and pushed every ` +
@@ -266,25 +276,40 @@ async function rotate(
             lastAssistantMessage: null,
           },
   });
-  taken.push('manifest');
+  taken.push(ctx.dryRun ? 'dry-run-manifest' : 'manifest');
   effects.checkpointed = true;
-  effects.manifestPath = checkpoint.manifestPath;
+  // A simulated manifest must never become `state.lastManifestPath`: that is
+  // what `rotorcc resume` and the crash-reconstruction hook reach for, and
+  // handing them a document whose every row says "would commit" is how a
+  // simulation gets presented as a rescue.
+  effects.manifestPath = ctx.dryRun ? null : checkpoint.manifestPath;
 
-  store.raiseFlag(FLAG_ROTATE_NOW, {
-    raisedAt: new Date().toISOString(),
-    reason:
-      `Account ${active?.number ?? '?'} is down to ${decision.headroomPct.toFixed(0)}% on the ` +
-      `${decision.bindingWindow} window. rotorcc is rotating to account ${action.targetAccount}. ` +
-      'Finish the tool call you are in, order every agent to commit, push and write its resume ' +
-      'note, then stop dispatching new work and exit. A replacement session is starting with the ' +
-      'manifest below.',
-    ...(checkpoint.manifestPath !== null ? { manifestPath: checkpoint.manifestPath } : {}),
-    ...(checkpoint.manifestMarkdownPath !== null
-      ? { manifestMarkdownPath: checkpoint.manifestMarkdownPath }
-      : {}),
-    targetAccount: action.targetAccount,
-    headroomPct: decision.headroomPct,
-  });
+  // A dry run does not raise a live flag. On 2026-08-18 one that did was read
+  // by the UserPromptSubmit hook hours later, on a healthy session with 72%
+  // headroom and rotation disabled, and told the orchestrator to exit. A flag
+  // is an instruction to a live session; a simulation must not be able to
+  // issue one.
+  if (ctx.dryRun) {
+    logger.info('dry run: would raise ROTATE_NOW', { target: action.targetAccount });
+    taken.push('dry-run-flag-suppressed');
+  } else {
+    store.raiseFlag(FLAG_ROTATE_NOW, {
+      raisedAt: new Date().toISOString(),
+      level: 'rotate',
+      reason:
+        `Account ${active?.number ?? '?'} is down to ${decision.headroomPct.toFixed(0)}% on the ` +
+        `${decision.bindingWindow} window. rotorcc is rotating to account ${action.targetAccount}. ` +
+        'Finish the tool call you are in, order every agent to commit, push and write its resume ' +
+        'note, then stop dispatching new work and exit. A replacement session is starting with the ' +
+        'manifest below.',
+      ...(checkpoint.manifestPath !== null ? { manifestPath: checkpoint.manifestPath } : {}),
+      ...(checkpoint.manifestMarkdownPath !== null
+        ? { manifestMarkdownPath: checkpoint.manifestMarkdownPath }
+        : {}),
+      targetAccount: action.targetAccount,
+      headroomPct: decision.headroomPct,
+    });
+  }
 
   const cwd =
     config.successor.cwd !== ''

@@ -92,6 +92,18 @@ export const manifestSchema = z.object({
   nextCommands: z.array(z.string()).default([]),
   /** False when the predecessor was killed rather than stopped. */
   cleanExit: z.boolean(),
+  /**
+   * True when this manifest is a SIMULATION.
+   *
+   * Every tree row in a dry-run manifest reads "would commit N file(s)" — the
+   * work described as saved was never saved. On 2026-08-18 exactly such a
+   * manifest was surfaced by the resume banner as a rescue record while
+   * thirteen trees sat unpushed for twenty hours. Defaulted to `false` so that
+   * a manifest written before this field existed reads as the real thing it
+   * was, and marked at every level below: in the JSON, in the Markdown's first
+   * line, and in the directory the file is written to.
+   */
+  dryRun: z.boolean().default(false),
 });
 
 export type Manifest = z.infer<typeof manifestSchema>;
@@ -143,7 +155,22 @@ export function renderManifestMarkdown(manifest: Manifest): string {
   const lines: string[] = [];
   const push = (s = '') => lines.push(s);
 
-  push(`# Resume manifest ${manifest.id}`);
+  if (manifest.dryRun) {
+    // First, loudest, and before the title. A reader who takes only the first
+    // line away from this document must take away the fact that none of it
+    // happened — that is the whole failure being prevented.
+    push('> # ⚠ DRY RUN — NOTHING IN THIS DOCUMENT WAS ACTUALLY DONE');
+    push('>');
+    push('> This is a SIMULATION of a checkpoint. No commit was made, nothing was');
+    push('> pushed, no account was switched. Every "would commit" below describes');
+    push('> work that is still only on the local disk.');
+    push('>');
+    push('> **Do not treat this as a rescue record.** Run `rotorcc status` to see');
+    push('> what is actually unsaved right now.');
+    push();
+  }
+
+  push(`# Resume manifest ${manifest.id}${manifest.dryRun ? ' (DRY RUN — SIMULATED)' : ''}`);
   push();
   push(
     `Written ${manifest.createdAt} by rotorcc ${manifest.tool.version}, trigger \`${manifest.trigger}\`.`,

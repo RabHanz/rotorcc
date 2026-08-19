@@ -136,8 +136,12 @@ export async function buildStatus(
     lastSnapshotAt: state.lastSnapshotAt,
     lastManifest: store.latestManifest(),
     flags: {
-      soft: store.readFlag(FLAG_SOFT_CHECKPOINT) !== null,
-      rotate: store.readFlag(FLAG_ROTATE_NOW) !== null,
+      // The level is passed so a flag describing a world that no longer exists
+      // is dropped rather than displayed. `status` showing ROTATE_NOW beside
+      // "72% headroom, level ok" is the screen that told an orchestrator to
+      // exit on a false alarm.
+      soft: store.readFlag(FLAG_SOFT_CHECKPOINT, { currentLevel: level }) !== null,
+      rotate: store.readFlag(FLAG_ROTATE_NOW, { currentLevel: level }) !== null,
     },
     lanes,
     unsavedTrees: lanes.length,

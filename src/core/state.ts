@@ -31,7 +31,30 @@ export interface FlagPayload {
   manifestMarkdownPath?: string;
   targetAccount?: number;
   headroomPct?: number;
+  /**
+   * The severity level that was true when this was raised.
+   *
+   * Recorded so a reader can cross-check the flag against reality instead of
+   * obeying it on faith. On 2026-08-18 a `ROTATE_NOW` left behind by a dry run
+   * was surfaced to a healthy live session hours later — 72% headroom, rotation
+   * disabled — and told the orchestrator to exit. A flag that carries the level
+   * it was raised at can be discarded the moment that level stops holding.
+   */
+  level?: string;
+  /**
+   * ISO time past which this flag means nothing.
+   *
+   * A rotation signal is about right now. One that survives on disk for hours
+   * is not stale information, it is wrong information, and it is read as an
+   * instruction. `readFlag` refuses to return an expired flag.
+   */
+  expiresAt?: string;
+  /** True when a dry run produced this. Such a flag is never an instruction. */
+  dryRun?: boolean;
 }
+
+/** Default life of a raised flag. Past this it is discarded, not obeyed. */
+export const FLAG_TTL_MS = 30 * 60_000;
 
 export class Store {
   constructor(readonly dir: string) {}
@@ -69,12 +92,75 @@ export class Store {
     this.writeAtomic('state.json', `${JSON.stringify(state, null, 2)}\n`);
   }
 
-  raiseFlag(name: string, payload: FlagPayload): string {
+  /**
+   * Raise a flag.
+   *
+   * `expiresAt` is filled in when the caller did not supply one, so there is no
+   * way to raise a flag that lives forever — the default is the safe one and
+   * forgetting it is not possible.
+   */
+  raiseFlag(name: string, payload: FlagPayload, ttlMs = FLAG_TTL_MS): string {
     this.ensure();
-    return this.writeAtomic(join('flags', name), `${JSON.stringify(payload, null, 2)}\n`);
+    const raisedAt = payload.raisedAt;
+    const expiresAt =
+      payload.expiresAt ??
+      new Date((Number.isNaN(Date.parse(raisedAt)) ? Date.now() : Date.parse(raisedAt)) + ttlMs)
+        .toISOString();
+    return this.writeAtomic(
+      join('flags', name),
+      `${JSON.stringify({ ...payload, expiresAt }, null, 2)}\n`,
+    );
   }
 
-  readFlag(name: string): FlagPayload | null {
+  /**
+   * Read a flag, discarding one that has expired or that a dry run wrote.
+   *
+   * The deletion is deliberate and not merely a filter. A flag on disk gets
+   * read by the next process too, and by a human looking at the state
+   * directory; leaving an expired one there to be ignored six more times is
+   * how it eventually gets obeyed by whichever reader forgot to check.
+   *
+   * `currentLevel`, when supplied, is cross-checked against the level the flag
+   * was raised at. A `ROTATE_NOW` raised at `rotate` while the account now
+   * reads `ok` is describing a world that no longer exists.
+   */
+  readFlag(name: string, options: { nowMs?: number; currentLevel?: string } = {}): FlagPayload | null {
+    let payload: FlagPayload;
+    try {
+      payload = JSON.parse(readFileSync(this.path('flags', name), 'utf8')) as FlagPayload;
+    } catch {
+      return null;
+    }
+
+    const nowMs = options.nowMs ?? Date.now();
+
+    if (payload.dryRun === true) {
+      this.clearFlag(name);
+      return null;
+    }
+
+    if (payload.expiresAt !== undefined) {
+      const expires = Date.parse(payload.expiresAt);
+      if (!Number.isNaN(expires) && nowMs >= expires) {
+        this.clearFlag(name);
+        return null;
+      }
+    }
+
+    if (
+      options.currentLevel !== undefined &&
+      payload.level !== undefined &&
+      !levelStillHolds(payload.level, options.currentLevel)
+    ) {
+      this.clearFlag(name);
+      return null;
+    }
+
+    return payload;
+  }
+
+  /** The raw flag, expiry and all. For diagnostics only — never for a decision. */
+  peekFlag(name: string): FlagPayload | null {
     try {
       return JSON.parse(readFileSync(this.path('flags', name), 'utf8')) as FlagPayload;
     } catch {
@@ -184,6 +270,22 @@ export class Store {
   absolute(relative: string): string {
     return this.path(relative);
   }
+}
+
+/**
+ * Whether a flag raised at `raised` still holds now that the level is `current`.
+ *
+ * Ordered by severity: a flag survives while things are at least as bad as when
+ * it was raised. Recovery clears it. An unrecognised level errs toward keeping
+ * the flag — dropping a real rotation signal because of a spelling we did not
+ * expect would be the more expensive mistake.
+ */
+export function levelStillHolds(raised: string, current: string): boolean {
+  const order = ['ok', 'warn', 'soft', 'rotate'];
+  const raisedRank = order.indexOf(raised);
+  const currentRank = order.indexOf(current);
+  if (raisedRank === -1 || currentRank === -1) return true;
+  return currentRank >= raisedRank;
 }
 
 /** `2026-08-18T01-23-45-678Z`: sortable, and legal as a filename everywhere. */

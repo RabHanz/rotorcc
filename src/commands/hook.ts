@@ -103,8 +103,23 @@ function recordTasks(store: Store, payload: HookPayload): void {
   }
 }
 
+/**
+ * Turn a raised flag into context for the live session.
+ *
+ * The cross-check against `state.lastLevel` is the whole reason this is not a
+ * bare `readFlag`. A hook is the one place a flag becomes an INSTRUCTION to a
+ * running agent, and on 2026-08-18 a `ROTATE_NOW` left behind by a dry run was
+ * surfaced here hours later to a healthy session — 72% headroom, rotation
+ * disabled — and told the orchestrator to exit.
+ *
+ * `state.lastLevel` is what the most recent tick actually observed, it costs
+ * one file read, and a flag whose level no longer holds is dropped from disk
+ * rather than merely ignored: leaving it there means the next reader that
+ * forgets this check obeys it.
+ */
 function flagContext(store: Store): { additionalContext: string; systemMessage: string } | null {
-  const rotate = store.readFlag(FLAG_ROTATE_NOW);
+  const currentLevel = store.readState().lastLevel;
+  const rotate = store.readFlag(FLAG_ROTATE_NOW, { currentLevel });
   if (rotate !== null) {
     const manifest = rotate.manifestMarkdownPath ?? rotate.manifestPath ?? '(none written)';
     return {
@@ -123,10 +138,15 @@ function flagContext(store: Store): { additionalContext: string; systemMessage: 
     };
   }
 
-  const soft = store.readFlag(FLAG_SOFT_CHECKPOINT);
+  const soft = store.readFlag(FLAG_SOFT_CHECKPOINT, { currentLevel });
   if (soft !== null) {
+    // `?? 0` here would have told the operator "0% headroom left" whenever the
+    // figure was simply absent — a number invented out of a missing field, and
+    // the most alarming one available.
+    const headroom =
+      soft.headroomPct === undefined ? 'headroom unknown' : `${Math.round(soft.headroomPct)}% headroom left`;
     return {
-      systemMessage: `rotorcc: soft checkpoint requested (${Math.round(soft.headroomPct ?? 0)}% headroom left)`,
+      systemMessage: `rotorcc: soft checkpoint requested (${headroom})`,
       additionalContext: [
         '<rotorcc-alert level="soft-checkpoint">',
         soft.reason,

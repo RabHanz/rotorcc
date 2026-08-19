@@ -41,6 +41,7 @@ const manifest: Manifest = {
   id: '2026-08-18T01-23-45-678Z',
   createdAt: '2026-08-18T01:23:45.678Z',
   trigger: 'rotate',
+  dryRun: false,
   tool: { name: 'rotorcc', version: '0.1.0' },
   session: {
     id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',

@@ -8,7 +8,7 @@
  * exactly one code path that makes work durable, and it is the same one
  * whichever way it was reached.
  */
-import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 
 import type { Config } from '../config/schema.js';
@@ -328,11 +328,19 @@ export async function performCheckpoint(input: CheckpointInput): Promise<Checkpo
     extras: await collectExtras(config, logger),
     nextCommands: nextCommands(config, result),
     cleanExit: input.cleanExit ?? false,
+    dryRun: input.dryRun,
   };
 
-  const jsonPath = store.absolute(join('manifests', `manifest-${id}.json`));
-  const mdPath = store.absolute(join('manifests', `manifest-${id}.md`));
+  // A simulated manifest goes in its own directory, so `latestManifest()` — the
+  // thing `rotorcc resume` and the crash-reconstruction hook read — can never
+  // return one. The banner in the Markdown is the second line of defence; this
+  // is the first, because a document that never reaches the rescue path cannot
+  // be mistaken for a rescue record however carefully somebody reads it.
+  const folder = input.dryRun ? join('manifests', 'dry-run') : 'manifests';
+  const jsonPath = store.absolute(join(folder, `manifest-${id}.json`));
+  const mdPath = store.absolute(join(folder, `manifest-${id}.md`));
   store.ensure();
+  mkdirSync(store.absolute(folder), { recursive: true });
   writeFileSync(jsonPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   writeFileSync(mdPath, renderManifestMarkdown(manifest), 'utf8');
 
