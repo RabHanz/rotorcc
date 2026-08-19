@@ -910,7 +910,7 @@ export async function tokenStatus(ctx: AccountsContext): Promise<number> {
       ? {
           state: 'found' as const,
           source: LIVE_SOURCE_LABELS[active.backend],
-          path: liveSourcePath(active.backend),
+          path: liveSourcePath(active.backend, store.env),
           degraded: active.degraded,
           ...credentialDiagnostics(active.value, now),
         }
@@ -1007,14 +1007,14 @@ const LIVE_SOURCE_LABELS: Record<'keychain' | 'file' | 'config', string> = {
   config: "Claude Code's global config (primaryApiKey)",
 };
 
-function liveSourcePath(backend: 'keychain' | 'file' | 'config'): string {
+function liveSourcePath(backend: 'keychain' | 'file' | 'config', env: NodeJS.ProcessEnv): string {
   switch (backend) {
     case 'keychain':
       return 'service "Claude Code-credentials"';
     case 'file':
-      return claudeCredentialsPath();
+      return claudeCredentialsPath(env);
     case 'config':
-      return claudeGlobalConfigPath();
+      return claudeGlobalConfigPath(env);
   }
 }
 

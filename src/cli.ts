@@ -147,7 +147,12 @@ export function parseArgv(argv: string[]): Argv {
   return { command, positionals, flags };
 }
 
-const HELP = `rotorcc ${VERSION} — zero-loss account rotation for long Claude Code sessions
+/**
+ * Exported so a test can assert that the contracts a script depends on — the
+ * `daemon --once` exit codes above all — are actually documented where somebody
+ * would look for them. Undocumented behaviour is behaviour nobody can rely on.
+ */
+export const HELP = `rotorcc ${VERSION} — zero-loss account rotation for long Claude Code sessions
 
 usage: rotorcc <command> [options]
 

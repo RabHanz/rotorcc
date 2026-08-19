@@ -308,7 +308,14 @@ export interface CredentialStoreOptions {
  * here is what makes the dangerous half small enough to read in one sitting.
  */
 export class CredentialStore {
-  private readonly env: NodeJS.ProcessEnv;
+  /**
+   * Public so a caller can NAME the file it read from using the same
+   * environment the read used. Resolving that path against `process.env`
+   * instead would print a path that was not the one consulted — under
+   * `rotorcc run`, or any redirected `CLAUDE_CONFIG_DIR`, a diagnostic that
+   * names the wrong file is worse than one that names none.
+   */
+  readonly env: NodeJS.ProcessEnv;
   private readonly platform: string;
   private readonly credentialsDir: string;
   /**

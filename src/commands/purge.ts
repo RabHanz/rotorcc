@@ -52,6 +52,8 @@ export interface PurgeContext {
   dryRun: boolean;
   json: boolean;
   out: (line: string) => void;
+  /** Injected in tests so a run can never resolve a real home directory. */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** Recursive size of a file or directory, best effort. */
@@ -90,9 +92,12 @@ export function purgeTargets(
   config: Config,
   manager: AccountManager,
   store: Store,
+  /** The `--config` in force, so `purge --config X` deletes X and not the default. */
+  configPath?: string,
   env: NodeJS.ProcessEnv = process.env,
 ): PurgeTarget[] {
   const paths = appPaths(env);
+  const configFile = configPathFor(configPath, env);
   const accountsDir = config.accountsDir === '' ? paths.accountsDir : config.accountsDir;
   const accountCount = (() => {
     try {
@@ -127,10 +132,10 @@ export function purgeTargets(
       irreversible: 'every transcript snapshot rotorcc has taken, unless you mirrored it elsewhere',
     },
     {
-      path: configPathFor(undefined),
+      path: configFile,
       what: "rotorcc's config file",
-      exists: existsSync(configPathFor(undefined)),
-      bytes: sizeOf(configPathFor(undefined)),
+      exists: existsSync(configFile),
+      bytes: sizeOf(configFile),
     },
   ];
 
@@ -160,8 +165,8 @@ export function protectedPaths(
 }
 
 export function runPurge(ctx: PurgeContext): number {
-  const targets = purgeTargets(ctx.config, ctx.manager, ctx.store);
-  const protectedList = protectedPaths(ctx.config);
+  const targets = purgeTargets(ctx.config, ctx.manager, ctx.store, ctx.configPath, ctx.env);
+  const protectedList = protectedPaths(ctx.config, ctx.env);
   const present = targets.filter((t) => t.exists);
   const totalBytes = present.reduce((sum, t) => sum + t.bytes, 0);
 

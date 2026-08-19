@@ -56,11 +56,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
 } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 
 import { type RunResult, run } from '../core/proc.js';
 import type { Config } from '../config/schema.js';
@@ -125,6 +126,8 @@ export interface UpgradeOptions {
   exec?: (argv: string[], options?: { cwd?: string; timeoutMs?: number }) => Promise<RunResult>;
   /** The node binary used to run a freshly built CLI. */
   nodePath?: string;
+  /** Injected in tests so a real rotorcc on the runner's PATH cannot skew a result. */
+  pathResolver?: (name: string) => Array<{ entry: string; target: string }>;
 }
 
 /**
@@ -313,6 +316,41 @@ export function ignoredBuildsAdvice(output: string): string | null {
     'pnpm-workspace.yaml under `allowBuilds:` (or run `pnpm approve-builds`), commit that, ' +
     'and upgrade again.'
   );
+}
+
+/**
+ * Every `name` on PATH, in PATH order, with what each one really points at.
+ *
+ * In-process rather than shelling out to `which`: `which` is not on Windows,
+ * `command -v` needs a shell, and this file does not use a shell anywhere. The
+ * first entry is the one the operator's next command will run — which is the
+ * only one that matters, and the one an upgrade can be silently wrong about.
+ */
+export function resolveOnPath(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+  isWindows: boolean = process.platform === 'win32',
+): Array<{ entry: string; target: string }> {
+  const raw = env.PATH ?? env.Path ?? '';
+  if (raw === '') return [];
+  const extensions = isWindows ? ['.cmd', '.exe', '.bat', ''] : [''];
+  const found: Array<{ entry: string; target: string }> = [];
+  const seen = new Set<string>();
+  for (const dir of raw.split(delimiter).filter((part) => part !== '')) {
+    for (const extension of extensions) {
+      const candidate = join(dir, `${name}${extension}`);
+      if (seen.has(candidate) || !existsSync(candidate)) continue;
+      seen.add(candidate);
+      let target = candidate;
+      try {
+        target = realpathSync(candidate);
+      } catch {
+        /* a dangling symlink: report the link itself, which is the useful fact */
+      }
+      found.push({ entry: candidate, target });
+    }
+  }
+  return found;
 }
 
 /** The newest mtime under a directory tree, or null when it does not exist. */
@@ -943,16 +981,30 @@ async function appendCheckoutBinaryCheck(
     );
     return;
   }
-  if (options.repoRoot === undefined && resolve(options.binaryPath) !== resolve(expected)) {
+  // What does the operator's shell actually find? This is the Director's real
+  // failure and it is invisible from inside the process: a checkout gets
+  // rebuilt, and `rotorcc` on PATH is a different, older copy the whole time.
+  const onPath = (options.pathResolver ?? resolveOnPath)(PACKAGE_NAME);
+  if (onPath.length === 0) {
+    ctx.notes.push(
+      `nothing called "${PACKAGE_NAME}" is on your PATH. This checkout is built, but you will ` +
+        `have to run it by path — or link it: ln -s ${expected} ~/.local/bin/${PACKAGE_NAME}`,
+    );
+  } else if (resolve(onPath[0]?.target ?? '') !== resolve(expected)) {
     report.ok = false;
     push(
       ctx,
       'binary',
       'refused',
-      `the rotorcc you ran resolves to ${options.binaryPath}, not ${expected}. That is a ` +
-        'different installation; upgrading this checkout will not change the one on your PATH.',
+      `"${PACKAGE_NAME}" on your PATH is ${onPath[0]?.entry} → ${onPath[0]?.target}, NOT ` +
+        `${expected}. Upgrading this checkout does not change what your shell runs. Either ` +
+        `re-point that link, or upgrade the installation that actually wins${
+          onPath.length > 1 ? ` (${onPath.length} copies are on your PATH)` : ''
+        }.`,
     );
     return;
+  } else {
+    push(ctx, 'path', 'ok', `${onPath[0]?.entry} → ${expected}`);
   }
 
   const distMtime = newestMtime(join(ctx.root, 'dist'));
