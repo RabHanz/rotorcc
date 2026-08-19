@@ -55,9 +55,9 @@ rotorcc status                  # the same facts, printed once
 rotorcc 0.1.0                                                            20:20:47
 
 ACCOUNTS
-    #1  signzart                   ░░░░░░░░░░░░░░░░   0% 5h      resets 19 Aug 20:30
-    #2  rabee                      ███████░░░░░░░░░  45% 7d      resets 24 Aug 09:00
-  ▸ #3  optima                     unknown                  quota read failed: http-429
+    #1  work                       ░░░░░░░░░░░░░░░░   0% 5h      resets 19 Aug 20:30
+    #2  spare                      ███████░░░░░░░░░  45% 7d      resets 24 Aug 09:00
+  ▸ #3  personal                   unknown                  quota read failed: http-429
   thresholds: warn 15% · soft 10% · rotate 5%
 
 PREDICTION
