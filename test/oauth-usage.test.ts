@@ -83,7 +83,7 @@ describe('refreshToken', () => {
     expect(result.ok === false && result.error).toBe('invalid_grant');
   });
 
-  it('does NOT treat invalid_client as the account\'s fault', async () => {
+  it("does NOT treat invalid_client as the account's fault", async () => {
     // Our client id was rejected. That is systemic and says nothing about this
     // account; striking the slot for it would quarantine a live login.
     const fetchImpl = vi.fn(async () => jsonResponse({ error: 'invalid_client' }, 400));
@@ -112,9 +112,12 @@ describe('refreshToken', () => {
   });
 
   it('reports no_refresh_token only for a structurally complete credential without one', async () => {
-    const result = await refreshToken(asSecret(JSON.stringify({ claudeAiOauth: { accessToken: 'a' } })), {
-      fetchImpl: vi.fn(),
-    });
+    const result = await refreshToken(
+      asSecret(JSON.stringify({ claudeAiOauth: { accessToken: 'a' } })),
+      {
+        fetchImpl: vi.fn(),
+      },
+    );
     expect(result.ok === false && result.error).toBe('no_refresh_token');
   });
 
@@ -214,8 +217,10 @@ describe('fetchUsage', () => {
     expect(result.ok === false && result.error.kind).toBe('unauthorised');
   });
 
-  it('carries the server\'s Retry-After through a 429', async () => {
-    const fetchImpl = vi.fn(async () => new Response('', { status: 429, headers: { 'retry-after': '120' } }));
+  it("carries the server's Retry-After through a 429", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('', { status: 429, headers: { 'retry-after': '120' } }),
+    );
     const result = await fetchUsage('at', { fetchImpl });
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -261,7 +266,10 @@ describe('usage cache', () => {
 
   it('reports never-read as its own state, distinct from stale', () => {
     expect(freshnessOf(undefined).kind).toBe('never-read');
-    const old = { consecutiveFailures: 0, fetchedAt: new Date(Date.now() - 20 * 3_600_000).toISOString() };
+    const old = {
+      consecutiveFailures: 0,
+      fetchedAt: new Date(Date.now() - 20 * 3_600_000).toISOString(),
+    };
     expect(freshnessOf(old).kind).toBe('expired');
   });
 
@@ -269,7 +277,11 @@ describe('usage cache', () => {
     const dir = tempDir('rotorcc-cache-');
     try {
       const cache = new UsageCache(dir);
-      cache.recordSuccess(1, [{ name: '5h', usedPct: 20, resetsAt: null }], new Date().toISOString());
+      cache.recordSuccess(
+        1,
+        [{ name: '5h', usedPct: 20, resetsAt: null }],
+        new Date().toISOString(),
+      );
       expect(cache.mayPoll(1)).toBe(false);
       expect(cache.mayPoll(1, { force: true })).toBe(true);
       expect(cache.mayPoll(1, { nowMs: Date.now() + MIN_POLL_INTERVAL_MS + 1000 })).toBe(true);

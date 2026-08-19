@@ -105,7 +105,10 @@ export async function runAsAccount(options: RunAsOptions): Promise<number> {
     const identity = manager.credentials.readAccountIdentity(slot.slot, slot.email);
     // `.claude.json` lives beside the config home when CLAUDE_CONFIG_DIR is
     // set, so it goes inside the temp directory too.
-    writeJsonAtomic(join(home, '.claude.json'), identity === null ? {} : { oauthAccount: identity });
+    writeJsonAtomic(
+      join(home, '.claude.json'),
+      identity === null ? {} : { oauthAccount: identity },
+    );
 
     if (command.length === 0) {
       keepHome = true;

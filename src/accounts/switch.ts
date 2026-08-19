@@ -281,9 +281,7 @@ export async function switchAccount(options: SwitchOptions): Promise<SwitchResul
       await entry.run();
     } catch (err) {
       rolledBack = false;
-      warnings.push(
-        `rollback of "${entry.step}" failed: ${(err as Error).message.slice(0, 160)}`,
-      );
+      warnings.push(`rollback of "${entry.step}" failed: ${(err as Error).message.slice(0, 160)}`);
     }
   }
 

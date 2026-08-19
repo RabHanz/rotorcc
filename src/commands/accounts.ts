@@ -95,7 +95,9 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
     ctx.out('rotorcc manages no accounts yet.');
     ctx.out('');
     ctx.out('  rotorcc accounts add                    capture the login Claude Code is using now');
-    ctx.out('  rotorcc accounts import --from-cswap    bring across an existing switcher\'s accounts');
+    ctx.out(
+      "  rotorcc accounts import --from-cswap    bring across an existing switcher's accounts",
+    );
     return 0;
   }
 
@@ -181,7 +183,7 @@ export async function addAccount(
     (typeof identityRecord.emailAddress === 'string' ? identityRecord.emailAddress : undefined) ??
     (typeof identityRecord.email === 'string' ? identityRecord.email : undefined);
   if (email === undefined || email === '') {
-    ctx.out('cannot add: could not determine this login\'s email from Claude Code\'s config.');
+    ctx.out("cannot add: could not determine this login's email from Claude Code's config.");
     ctx.out('Pass it explicitly:  rotorcc accounts add --email you@example.com');
     return 1;
   }
@@ -259,16 +261,16 @@ export async function addToken(
   const roster = ctx.manager.roster.read();
   const slot = options.slot ?? nextFreeSlot(roster);
   const isApiKey = kind === 'api-key';
-  const email =
-    options.email ??
-    `${isApiKey ? 'api-key' : 'setup-token'}-${slot}@token.local`;
+  const email = options.email ?? `${isApiKey ? 'api-key' : 'setup-token'}-${slot}@token.local`;
 
   if (roster.accounts[String(slot)] !== undefined && !ctx.yes) {
     ctx.out(`slot ${slot} is already taken. Pass --yes to overwrite it, or choose --slot.`);
     return 1;
   }
   if (ctx.dryRun) {
-    ctx.out(`DRY RUN — would register a ${isApiKey ? 'managed API key' : 'setup token'} as slot ${slot}.`);
+    ctx.out(
+      `DRY RUN — would register a ${isApiKey ? 'managed API key' : 'setup token'} as slot ${slot}.`,
+    );
     return 0;
   }
 
@@ -301,7 +303,9 @@ export async function removeAccount(ctx: AccountsContext, identifier: string): P
   if (found === null) return 1;
   if (!ctx.yes) {
     ctx.out(`this removes slot ${found.slot} (${slotLabel(found)}) and its stored credential.`);
-    ctx.out('If this is the only copy of that login, you will have to log in again to get it back.');
+    ctx.out(
+      'If this is the only copy of that login, you will have to log in again to get it back.',
+    );
     ctx.out('Re-run with --yes to confirm.');
     return 1;
   }
@@ -353,11 +357,7 @@ export function setAlias(ctx: AccountsContext, identifier: string, alias: string
   return 0;
 }
 
-export function setDisabled(
-  ctx: AccountsContext,
-  identifier: string,
-  disabled: boolean,
-): number {
+export function setDisabled(ctx: AccountsContext, identifier: string, disabled: boolean): number {
   const found = requireSlot(ctx, identifier);
   if (found === null) return 1;
   ctx.manager.roster.update((r) => {
@@ -397,14 +397,16 @@ export async function swapAccounts(
   const stashA = await ctx.manager.credentials.readStash(a.slot, a.email);
   const stashB = await ctx.manager.credentials.readStash(b.slot, b.email);
   if (stashA.kind === 'unreadable' || stashB.kind === 'unreadable') {
-    ctx.out('refusing to swap: one of those slots\' credentials could not be read.');
+    ctx.out("refusing to swap: one of those slots' credentials could not be read.");
     return 1;
   }
   const identityA = ctx.manager.credentials.readAccountIdentity(a.slot, a.email);
   const identityB = ctx.manager.credentials.readAccountIdentity(b.slot, b.email);
 
-  if (stashA.kind === 'found') await ctx.manager.credentials.writeStash(b.slot, a.email, stashA.value);
-  if (stashB.kind === 'found') await ctx.manager.credentials.writeStash(a.slot, b.email, stashB.value);
+  if (stashA.kind === 'found')
+    await ctx.manager.credentials.writeStash(b.slot, a.email, stashA.value);
+  if (stashB.kind === 'found')
+    await ctx.manager.credentials.writeStash(a.slot, b.email, stashB.value);
   if (identityA !== null) ctx.manager.credentials.writeAccountIdentity(b.slot, a.email, identityA);
   if (identityB !== null) ctx.manager.credentials.writeAccountIdentity(a.slot, b.email, identityB);
   await ctx.manager.credentials.deleteStash(a.slot, a.email);
@@ -441,14 +443,15 @@ export async function moveAccount(
   }
   const stash = await ctx.manager.credentials.readStash(found.slot, found.email);
   if (stash.kind === 'unreadable') {
-    ctx.out('refusing to move: that slot\'s credential could not be read.');
+    ctx.out("refusing to move: that slot's credential could not be read.");
     return 1;
   }
   if (stash.kind === 'found') {
     await ctx.manager.credentials.writeStash(target, found.email, stash.value);
   }
   const identity = ctx.manager.credentials.readAccountIdentity(found.slot, found.email);
-  if (identity !== null) ctx.manager.credentials.writeAccountIdentity(target, found.email, identity);
+  if (identity !== null)
+    ctx.manager.credentials.writeAccountIdentity(target, found.email, identity);
   await ctx.manager.credentials.deleteStash(found.slot, found.email);
   ctx.manager.credentials.deleteAccountIdentity(found.slot, found.email);
 
@@ -501,7 +504,11 @@ export async function importAccounts(
     return 1;
   }
   ctx.out('');
-  ctx.out('rotorcc now has its own copies. The source store was not modified and is not read again.');
+  ctx.out(
+    ctx.dryRun
+      ? 'Nothing was written. Re-run without --dry-run to actually import.'
+      : 'rotorcc now has its own copies. The source store was not modified and is not read again.',
+  );
   return 0;
 }
 
@@ -562,7 +569,9 @@ export async function importBundle(ctx: AccountsContext, path: string): Promise<
   }
   let bundle: { accounts?: Array<Record<string, unknown>> };
   try {
-    bundle = JSON.parse(readFileSync(path, 'utf8')) as { accounts?: Array<Record<string, unknown>> };
+    bundle = JSON.parse(readFileSync(path, 'utf8')) as {
+      accounts?: Array<Record<string, unknown>>;
+    };
   } catch (err) {
     ctx.out(`${path} is not valid JSON: ${(err as Error).message.slice(0, 120)}`);
     return 1;

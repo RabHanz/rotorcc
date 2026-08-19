@@ -104,8 +104,9 @@ export class Store {
     const raisedAt = payload.raisedAt;
     const expiresAt =
       payload.expiresAt ??
-      new Date((Number.isNaN(Date.parse(raisedAt)) ? Date.now() : Date.parse(raisedAt)) + ttlMs)
-        .toISOString();
+      new Date(
+        (Number.isNaN(Date.parse(raisedAt)) ? Date.now() : Date.parse(raisedAt)) + ttlMs,
+      ).toISOString();
     return this.writeAtomic(
       join('flags', name),
       `${JSON.stringify({ ...payload, expiresAt }, null, 2)}\n`,
@@ -124,7 +125,10 @@ export class Store {
    * was raised at. A `ROTATE_NOW` raised at `rotate` while the account now
    * reads `ok` is describing a world that no longer exists.
    */
-  readFlag(name: string, options: { nowMs?: number; currentLevel?: string } = {}): FlagPayload | null {
+  readFlag(
+    name: string,
+    options: { nowMs?: number; currentLevel?: string } = {},
+  ): FlagPayload | null {
     let payload: FlagPayload;
     try {
       payload = JSON.parse(readFileSync(this.path('flags', name), 'utf8')) as FlagPayload;

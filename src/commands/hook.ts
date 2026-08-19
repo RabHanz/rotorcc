@@ -144,7 +144,9 @@ function flagContext(store: Store): { additionalContext: string; systemMessage: 
     // figure was simply absent — a number invented out of a missing field, and
     // the most alarming one available.
     const headroom =
-      soft.headroomPct === undefined ? 'headroom unknown' : `${Math.round(soft.headroomPct)}% headroom left`;
+      soft.headroomPct === undefined
+        ? 'headroom unknown'
+        : `${Math.round(soft.headroomPct)}% headroom left`;
     return {
       systemMessage: `rotorcc: soft checkpoint requested (${headroom})`,
       additionalContext: [

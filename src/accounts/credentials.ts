@@ -282,7 +282,12 @@ export class CredentialStore {
     if (this.useKeychain()) {
       const result = await getPassword(CLAUDE_OAUTH_SERVICE, keychainAccountName(this.env));
       if (result.kind === 'found') {
-        return { kind: 'found', value: asSecret(result.value), degraded: false, backend: 'keychain' };
+        return {
+          kind: 'found',
+          value: asSecret(result.value),
+          degraded: false,
+          backend: 'keychain',
+        };
       }
       if (result.kind === 'unreadable') {
         this.keychainUsable = false;
@@ -510,7 +515,12 @@ export class CredentialStore {
     if (this.useKeychain()) {
       const result = await getPassword(ROTORCC_SERVICE, this.stashKeychainAccount(slot, email));
       if (result.kind === 'found') {
-        return { kind: 'found', value: asSecret(result.value), degraded: false, backend: 'keychain' };
+        return {
+          kind: 'found',
+          value: asSecret(result.value),
+          degraded: false,
+          backend: 'keychain',
+        };
       }
       if (result.kind === 'unreadable') {
         this.keychainUsable = false;

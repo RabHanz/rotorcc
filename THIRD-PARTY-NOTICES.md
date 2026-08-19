@@ -24,15 +24,15 @@ discoveries and it would be dishonest to present them as such. Specifically,
 the following were learned from claude-swap and are reflected in rotorcc's
 `src/accounts/`:
 
-| What | Where in rotorcc |
-| --- | --- |
-| Claude Code's config/credential path resolution, including the `~/.claude.json` vs `<config-home>/.config.json` asymmetry | `src/core/paths.ts` |
-| The `proper-lockfile` directory-lock protocol Claude Code uses, the two credential locks and their acquisition order, and the 60s/10s staleness values | `src/accounts/ccLock.ts` |
-| That Claude Code reads the macOS Keychain before the plaintext credentials file, and that OAuth and managed API keys are separate auth axes that must be mutually cleared | `src/accounts/credentials.ts` |
-| That MCP OAuth state and plugin secrets are machine-shared rather than account-scoped, and must be composed from the live copy on activation | `src/accounts/credentials.ts` |
-| The OAuth token endpoint, the usage endpoint, the `anthropic-beta` header value, the public client id, and the shape of the usage response including per-model `limits` entries | `src/accounts/oauth.ts` |
-| That a refresh token is one-time, so a credential read from a lagging backend must never be refreshed | `src/accounts/oauth.ts`, `src/accounts/credentials.ts` |
-| The pace / projected-exhaustion idea for weekly windows | `src/core/burn.ts` |
+| What                                                                                                                                                                            | Where in rotorcc                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Claude Code's config/credential path resolution, including the `~/.claude.json` vs `<config-home>/.config.json` asymmetry                                                       | `src/core/paths.ts`                                    |
+| The `proper-lockfile` directory-lock protocol Claude Code uses, the two credential locks and their acquisition order, and the 60s/10s staleness values                          | `src/accounts/ccLock.ts`                               |
+| That Claude Code reads the macOS Keychain before the plaintext credentials file, and that OAuth and managed API keys are separate auth axes that must be mutually cleared       | `src/accounts/credentials.ts`                          |
+| That MCP OAuth state and plugin secrets are machine-shared rather than account-scoped, and must be composed from the live copy on activation                                    | `src/accounts/credentials.ts`                          |
+| The OAuth token endpoint, the usage endpoint, the `anthropic-beta` header value, the public client id, and the shape of the usage response including per-model `limits` entries | `src/accounts/oauth.ts`                                |
+| That a refresh token is one-time, so a credential read from a lagging backend must never be refreshed                                                                           | `src/accounts/oauth.ts`, `src/accounts/credentials.ts` |
+| The pace / projected-exhaustion idea for weekly windows                                                                                                                         | `src/core/burn.ts`                                     |
 
 Several of these are load-bearing safety properties that are not obvious and
 would most likely have been discovered the expensive way. The credit is owed.

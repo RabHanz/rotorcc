@@ -321,7 +321,10 @@ export async function checkpointTree(
     // Routine trigger: leave the agent's uncommitted edits alone and only push
     // what it has already committed. The dirty count still reaches the manifest.
     if ((tree.ahead ?? 0) === 0) {
-      return { ...base, skipped: `${tree.dirtyFiles} dirty file(s) left uncommitted (routine trigger)` };
+      return {
+        ...base,
+        skipped: `${tree.dirtyFiles} dirty file(s) left uncommitted (routine trigger)`,
+      };
     }
   } else if (tree.dirtyFiles > 0) {
     if (options.dryRun) {

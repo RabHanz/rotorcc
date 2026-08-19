@@ -17,11 +17,7 @@ import { switchAccount } from '../accounts/switch.js';
 import { resolveIdentifier, slots } from '../accounts/roster.js';
 import { BurnStore, burnRateFrom } from './burn.js';
 import { DecisionJournal } from './history.js';
-import {
-  assessRotationSafety,
-  collectWorkload,
-  estimateHeadroomNeeded,
-} from './workload.js';
+import { assessRotationSafety, collectWorkload, estimateHeadroomNeeded } from './workload.js';
 import { type Action, type Decision, decide, decideHardKill } from './decide.js';
 import {
   performCheckpoint,
@@ -535,10 +531,7 @@ async function applyWorkAwareGate(
     return {
       decision: {
         ...decision,
-        actions: [
-          { kind: 'blocked', reason: better.reason },
-          { kind: 'soft-checkpoint' },
-        ],
+        actions: [{ kind: 'blocked', reason: better.reason }, { kind: 'soft-checkpoint' }],
         reason: `${decision.reason}; ROTATION REFUSED — ${better.reason}`,
       },
       unsavedTrees,
@@ -551,7 +544,9 @@ async function applyWorkAwareGate(
     decision: {
       ...decision,
       actions: decision.actions.map((a) =>
-        a.kind === 'rotate' ? { kind: 'rotate', targetAccount: better.chosen?.number ?? a.targetAccount } : a,
+        a.kind === 'rotate'
+          ? { kind: 'rotate', targetAccount: better.chosen?.number ?? a.targetAccount }
+          : a,
       ),
       reason: `${decision.reason}; retargeted by work-aware sizing — ${better.reason}`,
       nextState: {

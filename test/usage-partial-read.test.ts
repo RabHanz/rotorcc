@@ -75,9 +75,7 @@ describe('readingFromListOutput — partial reads', () => {
   it('accepts null inside the window fields without discarding the account', () => {
     const reading = readingFromListOutput(
       {
-        accounts: [
-          { number: 1, usage: { fiveHour: null, sevenDay: { pct: 40 }, scoped: null } },
-        ],
+        accounts: [{ number: 1, usage: { fiveHour: null, sevenDay: { pct: 40 }, scoped: null } }],
       },
       { observedAt },
     );

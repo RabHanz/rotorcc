@@ -150,7 +150,10 @@ export async function refreshToken(
       let marker: unknown;
       try {
         const body: unknown = await response.json();
-        marker = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined;
+        marker =
+          typeof body === 'object' && body !== null
+            ? (body as { error?: unknown }).error
+            : undefined;
       } catch {
         marker = undefined;
       }
@@ -195,7 +198,9 @@ export async function refreshToken(
   };
 }
 
-function identityFromTokenResponse(data: z.infer<typeof tokenResponseSchema>): TokenIdentity | null {
+function identityFromTokenResponse(
+  data: z.infer<typeof tokenResponseSchema>,
+): TokenIdentity | null {
   const account = data.account ?? null;
   const organization = data.organization ?? null;
   if (account === null && organization === null) return null;
@@ -233,8 +238,7 @@ export type UsageFetchError =
   | { kind: 'unauthorised' };
 
 export type UsageFetchResult =
-  | { ok: true; snapshot: UsageSnapshot }
-  | { ok: false; error: UsageFetchError };
+  { ok: true; snapshot: UsageSnapshot } | { ok: false; error: UsageFetchError };
 
 const usageWindowSchema = z
   .object({ utilization: z.number(), resets_at: z.string().nullish() })
@@ -325,9 +329,10 @@ export async function fetchUsage(
     const detail = describeNetworkError(err);
     return {
       ok: false,
-      error: detail.includes('abort') || detail.includes('timeout')
-        ? { kind: 'timeout' }
-        : { kind: 'network', detail },
+      error:
+        detail.includes('abort') || detail.includes('timeout')
+          ? { kind: 'timeout' }
+          : { kind: 'network', detail },
     };
   }
 

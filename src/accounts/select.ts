@@ -156,7 +156,12 @@ export function selectTarget(reading: UsageReading, options: SelectOptions): Sel
               ? `${account.headroomPct.toFixed(0)}% headroom, reset time unknown`
               : `${account.headroomPct.toFixed(0)}% headroom, resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`,
         }));
-      return finish(ranked, rejected, options.strategy, 'soonest reset first, to spend expiring quota');
+      return finish(
+        ranked,
+        rejected,
+        options.strategy,
+        'soonest reset first, to spend expiring quota',
+      );
     }
 
     case 'work-aware': {

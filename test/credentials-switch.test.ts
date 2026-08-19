@@ -146,10 +146,16 @@ describe('credentialFingerprint', () => {
 });
 
 describe('machine-shared fields', () => {
-  it('splices the live machine\'s MCP state into the account being activated', () => {
+  it("splices the live machine's MCP state into the account being activated", () => {
     const target = JSON.stringify({ claudeAiOauth: { accessToken: 'a' }, mcpOAuth: { old: true } });
-    const live = JSON.stringify({ claudeAiOauth: { accessToken: 'b' }, mcpOAuth: { current: true } });
-    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<string, unknown>;
+    const live = JSON.stringify({
+      claudeAiOauth: { accessToken: 'b' },
+      mcpOAuth: { current: true },
+    });
+    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<
+      string,
+      unknown
+    >;
     expect(composed.mcpOAuth).toEqual({ current: true });
     expect((composed.claudeAiOauth as { accessToken: string }).accessToken).toBe('a');
   });
@@ -157,7 +163,10 @@ describe('machine-shared fields', () => {
   it('does not resurrect a shared key the machine no longer holds', () => {
     const target = JSON.stringify({ claudeAiOauth: { accessToken: 'a' }, mcpOAuth: { old: true } });
     const live = JSON.stringify({ claudeAiOauth: { accessToken: 'b' } });
-    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<string, unknown>;
+    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<
+      string,
+      unknown
+    >;
     expect(composed.mcpOAuth).toBeUndefined();
   });
 
@@ -170,7 +179,10 @@ describe('machine-shared fields', () => {
       claudeAiOauth: { accessToken: 'b' },
       trustedDeviceToken: 'live-device',
     });
-    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<string, unknown>;
+    const composed = JSON.parse(composeForActivation(asSecret(target), live)) as Record<
+      string,
+      unknown
+    >;
     // Carrying a live account-bound field across a switch would present one
     // account's credential under another's identity.
     expect(composed.trustedDeviceToken).toBe('target-device');
@@ -233,7 +245,11 @@ describe('global config', () => {
       const path = join(h.claudeHome, '.claude.json');
       writeFileSync(
         path,
-        JSON.stringify({ oauthAccount: { emailAddress: 'a@x' }, projects: { p: 1 }, mcpServers: {} }),
+        JSON.stringify({
+          oauthAccount: { emailAddress: 'a@x' },
+          projects: { p: 1 },
+          mcpServers: {},
+        }),
       );
       h.credentials.updateGlobalConfig((config) => {
         config.oauthAccount = { emailAddress: 'b@x' };

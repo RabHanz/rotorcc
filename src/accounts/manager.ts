@@ -20,13 +20,7 @@ import type { Config } from '../config/schema.js';
 import { appPaths } from '../core/paths.js';
 import type { AccountReading, UsageReading, WindowReading } from '../core/usage.js';
 import { CredentialStore, type Secret, accessTokenExpired, oauthPayload } from './credentials.js';
-import {
-  type UsageWindow,
-  bindingWindow,
-  clampPct,
-  fetchUsage,
-  refreshToken,
-} from './oauth.js';
+import { type UsageWindow, bindingWindow, clampPct, fetchUsage, refreshToken } from './oauth.js';
 import { RosterStore, type RosterSlot, slots } from './roster.js';
 import { UsageCache, freshnessOf } from './usageCache.js';
 

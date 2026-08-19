@@ -55,14 +55,14 @@ export async function runPredict(options: PredictOptions): Promise<number> {
 
   const rows = reading.accounts.map((account) => {
     const rate = burnRateFrom(burn.series(account.number));
-    const prediction = predictThreshold(
-      account.headroomPct,
-      rate,
-      config.thresholds.rotatePct,
-    );
+    const prediction = predictThreshold(account.headroomPct, rate, config.thresholds.rotatePct);
     const requirement =
       workload === null
-        ? { estimatedPct: null, basis: workloadError ?? 'work in flight not inspected', confidence: 'none' as const }
+        ? {
+            estimatedPct: null,
+            basis: workloadError ?? 'work in flight not inspected',
+            confidence: 'none' as const,
+          }
         : estimateHeadroomNeeded(workload, rate.pctPerHour, {
             minimumPct: config.minTargetHeadroomPct,
           });

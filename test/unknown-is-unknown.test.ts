@@ -26,7 +26,11 @@ import { renderDashboard } from '../src/tui/render.js';
 import { palette } from '../src/tui/theme.js';
 import { cleanup, tempDir } from './helpers.js';
 
-function measured(number: number, headroomPct: number, extra: Partial<AccountReading> = {}): AccountReading {
+function measured(
+  number: number,
+  headroomPct: number,
+  extra: Partial<AccountReading> = {},
+): AccountReading {
   return {
     number,
     email: `a${number}@example.com`,
@@ -42,7 +46,11 @@ function measured(number: number, headroomPct: number, extra: Partial<AccountRea
   };
 }
 
-function unmeasured(number: number, reason: string, extra: Partial<AccountReading> = {}): AccountReading {
+function unmeasured(
+  number: number,
+  reason: string,
+  extra: Partial<AccountReading> = {},
+): AccountReading {
   return {
     number,
     email: `a${number}@example.com`,
@@ -332,10 +340,10 @@ describe('the dashboard never draws a number it does not have', () => {
   }
 
   it('prints the word "unknown" and the reason, and no percentage', () => {
-    const lines = renderDashboard(
-      baseModel([unmeasured(2, 'token needs re-auth')]),
-      { palette: colours, width: 200 },
-    );
+    const lines = renderDashboard(baseModel([unmeasured(2, 'token needs re-auth')]), {
+      palette: colours,
+      width: 200,
+    });
     const row = lines.find((l) => l.includes('a2@example.com'));
     expect(row).toBeDefined();
     expect(row).toContain('unknown');
@@ -374,10 +382,13 @@ describe('the dashboard never draws a number it does not have', () => {
   });
 
   it('marks a dry run unmissably in the header', () => {
-    const lines = renderDashboard({ ...baseModel([measured(2, 45)]), dryRun: true }, {
-      palette: colours,
-      width: 200,
-    });
+    const lines = renderDashboard(
+      { ...baseModel([measured(2, 45)]), dryRun: true },
+      {
+        palette: colours,
+        width: 200,
+      },
+    );
     expect(lines[0]).toContain('DRY RUN');
   });
 

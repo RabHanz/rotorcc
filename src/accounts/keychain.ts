@@ -35,9 +35,7 @@ export class KeychainError extends Error {
 }
 
 export type KeychainResult =
-  | { kind: 'found'; value: string }
-  | { kind: 'absent' }
-  | { kind: 'unreadable'; detail: string };
+  { kind: 'found'; value: string } | { kind: 'absent' } | { kind: 'unreadable'; detail: string };
 
 export function isMacOS(plat: string = process.platform): boolean {
   return plat === 'darwin';

@@ -60,7 +60,9 @@ describe('assessRotationSafety', () => {
   });
 
   it('REFUSES for a protected branch, which rotorcc will never commit to', () => {
-    const safety = assessRotationSafety(workload([tree({ branch: 'main', protectedBranch: true })]));
+    const safety = assessRotationSafety(
+      workload([tree({ branch: 'main', protectedBranch: true })]),
+    );
     expect(safety.verdict).toBe('refuse');
     expect(safety.reason).toContain('protected branch');
   });
@@ -86,7 +88,9 @@ describe('assessRotationSafety', () => {
   });
 
   it('names the trees that caused the refusal, not just the count', () => {
-    const safety = assessRotationSafety(workload([tree({ protectedBranch: true, branch: 'main' })]));
+    const safety = assessRotationSafety(
+      workload([tree({ protectedBranch: true, branch: 'main' })]),
+    );
     expect(safety.verdict === 'refuse' && safety.trees[0]?.branch).toBe('main');
   });
 

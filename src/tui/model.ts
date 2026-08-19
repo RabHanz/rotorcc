@@ -167,10 +167,10 @@ async function watcherHealth(config: Config): Promise<{ detail: string; healthy:
   void config;
   try {
     if (process.platform === 'linux') {
-      const result = await run(
-        ['systemctl', '--user', 'is-active', 'rotorcc.timer'],
-        { timeoutMs: 10_000, okCodes: [1, 3, 4] },
-      );
+      const result = await run(['systemctl', '--user', 'is-active', 'rotorcc.timer'], {
+        timeoutMs: 10_000,
+        okCodes: [1, 3, 4],
+      });
       const status = result.stdout.trim();
       if (status === 'active') return { detail: 'systemd timer active', healthy: true };
       if (status === '') return { detail: 'watcher status unavailable', healthy: null };

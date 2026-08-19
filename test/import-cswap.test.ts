@@ -196,7 +196,7 @@ describe('importFromCswap', () => {
     }
   });
 
-  it('does NOT inherit the source\'s idea of which account is active', async () => {
+  it("does NOT inherit the source's idea of which account is active", async () => {
     const { roster, root } = await runImport([
       { slot: 1, email: 'one@example.com' },
       { slot: 3, email: 'three@example.com' },
@@ -212,10 +212,9 @@ describe('importFromCswap', () => {
   });
 
   it('leaves an existing rotorcc slot alone unless --overwrite is given', async () => {
-    const { report, roster, root } = await runImport(
-      [{ slot: 1, email: 'incoming@example.com' }],
-      { seed: true },
-    );
+    const { report, roster, root } = await runImport([{ slot: 1, email: 'incoming@example.com' }], {
+      seed: true,
+    });
     try {
       expect(report.alreadyPresent).toEqual([1]);
       expect(slots(roster.read())[0]?.email).toBe('existing@example.com');
@@ -225,10 +224,10 @@ describe('importFromCswap', () => {
   });
 
   it('replaces it when --overwrite is given', async () => {
-    const { report, roster, root } = await runImport(
-      [{ slot: 1, email: 'incoming@example.com' }],
-      { seed: true, overwrite: true },
-    );
+    const { report, roster, root } = await runImport([{ slot: 1, email: 'incoming@example.com' }], {
+      seed: true,
+      overwrite: true,
+    });
     try {
       expect(report.imported.map((i) => i.slot)).toEqual([1]);
       expect(slots(roster.read())[0]?.email).toBe('incoming@example.com');

@@ -44,7 +44,7 @@ First release.
 - **One unreadable account blinded the whole reader, and no rotation ever fired.**
   The operator burned to 99% of their limit while the watcher ticked every 60
   seconds and `status` printed `accounts unreadable — expected object, received
-  null`. Two healthy accounts (45% and 91% headroom) were sitting right there.
+null`. Two healthy accounts (45% and 91% headroom) were sitting right there.
 
   Three compounding causes, all in `src/core/usage.ts`:
   1. The switcher emits `"usage": null` for an account whose quota it could not
@@ -69,6 +69,7 @@ First release.
   is the third defect of that shape (both below), and the first to cost real work.
 
 ### Fixed (found in production dogfood, 2026-08-18)
+
 - Routine hook events (`SubagentStop`, `Stop`, `UserPromptSubmit`) committed every
   dirty tree with a `wip(rotorcc)` commit and pushed it. On a busy orchestrator
   (48 trees, one perpetually-dirty from build artefacts) that meant a commit-and-

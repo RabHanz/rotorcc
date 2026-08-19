@@ -90,7 +90,9 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   }
   if (model.refreshing) flags.push(c.dim('refreshing…'));
   const right = `${flags.join(' ')} ${c.dim(stamp)}`.trim();
-  push(`${left}${' '.repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)))}${right}`);
+  push(
+    `${left}${' '.repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)))}${right}`,
+  );
   push();
 
   // -------------------------------------------------------------- accounts
@@ -105,7 +107,10 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     for (const account of model.usage.accounts) {
       for (const line of accountLines(account, model, c)) push(line);
     }
-    if (model.usage.activeDetectionReason !== undefined && model.usage.activeAccountNumber === null) {
+    if (
+      model.usage.activeDetectionReason !== undefined &&
+      model.usage.activeAccountNumber === null
+    ) {
       // The active account could not be identified. That is not a cosmetic gap:
       // every threshold in this tool is about the ACTIVE account.
       push(`  ${c.warn('active account not identified')} — ${model.usage.activeDetectionReason}`);
@@ -234,7 +239,9 @@ function accountLines(account: AccountReading, model: DashboardModel, c: Palette
     // The rule, made concrete. No bar, no percentage, no implication.
     const reason = account.unknownReason ?? 'not measured';
     const tag = account.disabled === true ? c.dim(' [disabled]') : '';
-    return [`  ${marker} ${number}${name} ${c.unknown(padVisible(UNKNOWN, 24))} ${c.dim(reason)}${tag}`];
+    return [
+      `  ${marker} ${number}${name} ${c.unknown(padVisible(UNKNOWN, 24))} ${c.dim(reason)}${tag}`,
+    ];
   }
 
   const level =
@@ -264,11 +271,7 @@ function accountLines(account: AccountReading, model: DashboardModel, c: Palette
   ];
 }
 
-function predictionLines(
-  prediction: AccountPrediction,
-  rotatePct: number,
-  c: Palette,
-): string[] {
+function predictionLines(prediction: AccountPrediction, rotatePct: number, c: Palette): string[] {
   const lines: string[] = [];
 
   if (prediction.rate.pctPerHour === null) {
@@ -279,7 +282,9 @@ function predictionLines(
     const when =
       prediction.prediction.inMs === null ? UNKNOWN : formatDuration(prediction.prediction.inMs);
     const colour =
-      prediction.prediction.inMs !== null && prediction.prediction.inMs < 30 * 60_000 ? c.bad : c.warn;
+      prediction.prediction.inMs !== null && prediction.prediction.inMs < 30 * 60_000
+        ? c.bad
+        : c.warn;
     lines.push(`  reaches ${rotatePct}% headroom in ${colour(when)}`);
     lines.push(
       `  ${c.dim(
