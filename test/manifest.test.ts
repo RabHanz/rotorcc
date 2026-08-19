@@ -19,10 +19,12 @@ const tree: TreeStatus = {
   protectedBranch: false,
   dirtyFiles: 3,
   ahead: 2,
+  behind: 0,
   hasRemote: true,
   remote: 'origin',
   upstream: 'origin/work/feature-a',
   tip: 'abc1234 add the thing',
+  headSha: 'abc1234000000000000000000000000000000000',
   midOperation: null,
   isMainTree: false,
 };

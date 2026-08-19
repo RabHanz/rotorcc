@@ -328,6 +328,131 @@ describe('discoverTrees', () => {
   });
 });
 
+/**
+ * The 2026-08-19 data-loss defect, pinned.
+ *
+ * The sweep committed a stale worktree over newer work three times in forty
+ * minutes and pushed each time. The two invariants below are what make that
+ * shape unavailable rather than unlikely, and each is tested against a real
+ * repository where the bad outcome is genuinely reachable if the guard is
+ * removed.
+ */
+describe('the sweep never publishes a tree that is not a descendant of what it overwrites', () => {
+  it('refuses to act at all when HEAD moved between the reading and the sweep', async () => {
+    git(repo, 'checkout', '-b', 'work/moving');
+    writeFileSync(join(repo, 'a.txt'), 'first\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'first');
+    git(repo, 'push', '-u', 'origin', 'work/moving');
+
+    writeFileSync(join(repo, 'a.txt'), 'dirty edit\n');
+    const tree = await inspectTree(ctx, repo, project(), true);
+    expect(tree).not.toBeNull();
+    expect(tree?.headSha).toMatch(/^[0-9a-f]{40}$/);
+
+    // Somebody else commits between the reading and the sweep. Everything the
+    // sweep believes — including the dirty file it is about to stage — is now
+    // about a repository that has moved on.
+    writeFileSync(join(repo, 'b.txt'), 'their newer work\n');
+    git(repo, 'add', 'b.txt');
+    git(repo, 'commit', '-m', 'theirs, landed in between');
+    const tipAfter = git(repo, 'rev-parse', 'HEAD').trim();
+
+    const result = await checkpointTree(ctx, tree as NonNullable<typeof tree>, options);
+
+    expect(result.committed).toBe(false);
+    expect(result.pushed).toBe(false);
+    expect(result.skipped).toContain('HEAD moved');
+    // The interloper's commit is still the tip: nothing was written over it.
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(tipAfter);
+    expect(git(repo, 'log', '--format=%s', '-1').trim()).toBe('theirs, landed in between');
+  });
+
+  it('commits locally but refuses to push when the remote has work this tree does not', async () => {
+    git(repo, 'checkout', '-b', 'work/behind');
+    writeFileSync(join(repo, 'a.txt'), 'base\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'base');
+    git(repo, 'push', '-u', 'origin', 'work/behind');
+
+    // Newer work reaches the remote from somewhere else — another machine,
+    // another agent, a human.
+    const other = join(root, 'other');
+    git(root, 'clone', remote, other);
+    git(other, 'config', 'user.name', 'Other');
+    git(other, 'config', 'user.email', 'other@example.com');
+    git(other, 'checkout', 'work/behind');
+    writeFileSync(join(other, 'a.txt'), 'THE NEWER WORK\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-m', 'newer work from elsewhere');
+    git(other, 'push', 'origin', 'work/behind');
+
+    // Our tree still holds the old content, and an agent dirties it again —
+    // which is exactly what the observed loop did on every iteration.
+    writeFileSync(join(repo, 'a.txt'), 'stale content, edited\n');
+    git(repo, 'fetch', 'origin');
+    const tree = await inspectTree(ctx, repo, project(), true);
+    expect(tree?.behind).toBe(1);
+
+    const result = await checkpointTree(ctx, tree as NonNullable<typeof tree>, options);
+
+    // The dirty work is saved locally — durability is the point of the tool.
+    expect(result.committed).toBe(true);
+    // But it is NOT published over the newer history.
+    expect(result.pushed).toBe(false);
+    expect(result.skipped).toContain('not an ancestor');
+    expect(result.error).toBeNull();
+    expect(git(remote, 'log', '--format=%s', '-1', 'work/behind').trim()).toBe(
+      'newer work from elsewhere',
+    );
+    expect(git(remote, 'show', 'work/behind:a.txt')).toBe('THE NEWER WORK\n');
+  });
+
+  it('still pushes normally when the tip really is a descendant', async () => {
+    git(repo, 'checkout', '-b', 'work/fine');
+    writeFileSync(join(repo, 'a.txt'), 'base\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'base');
+    git(repo, 'push', '-u', 'origin', 'work/fine');
+
+    writeFileSync(join(repo, 'a.txt'), 'a genuine edit\n');
+    const tree = await inspectTree(ctx, repo, project(), true);
+    const result = await checkpointTree(ctx, tree as NonNullable<typeof tree>, options);
+
+    expect(result.committed).toBe(true);
+    expect(result.pushed).toBe(true);
+    expect(result.skipped).toBeNull();
+    expect(git(remote, 'show', 'work/fine:a.txt')).toBe('a genuine edit\n');
+  });
+
+  it('reads ahead and behind independently, so neither hides the other', async () => {
+    git(repo, 'checkout', '-b', 'work/both');
+    writeFileSync(join(repo, 'a.txt'), 'base\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'base');
+    git(repo, 'push', '-u', 'origin', 'work/both');
+
+    const other = join(root, 'other-both');
+    git(root, 'clone', remote, other);
+    git(other, 'config', 'user.name', 'Other');
+    git(other, 'config', 'user.email', 'other@example.com');
+    git(other, 'checkout', 'work/both');
+    writeFileSync(join(other, 'theirs.txt'), 'theirs\n');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-m', 'theirs');
+    git(other, 'push', 'origin', 'work/both');
+
+    writeFileSync(join(repo, 'mine.txt'), 'mine\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'mine');
+    git(repo, 'fetch', 'origin');
+
+    const tree = await inspectTree(ctx, repo, project(), true);
+    expect(tree?.ahead).toBe(1);
+    expect(tree?.behind).toBe(1);
+  });
+});
+
 describe('checkpointMessage', () => {
   it('names the trigger and the moment, so the commit explains itself', () => {
     expect(checkpointMessage(options)).toBe(
