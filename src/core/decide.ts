@@ -23,6 +23,7 @@
  * session and loses the work; stopping loudly does not.
  */
 import type { Config } from '../config/schema.js';
+import { selectTarget } from '../accounts/select.js';
 import { type AccountReading, type UsageReading, activeAccount } from './usage.js';
 
 export type Level = 'ok' | 'warn' | 'soft' | 'rotate';
@@ -138,15 +139,27 @@ function latchIsLive(
   return account.headroomPct <= clearAt;
 }
 
-/** The account with the most headroom that is not the active one. */
+/**
+ * The best account to rotate onto that is not the active one.
+ *
+ * Delegates to `selectTarget`, and that is the point. This used to be a second,
+ * cruder selector with its own `sort by headroomPct` — so the watcher and
+ * `rotorcc switch` could choose differently from the same reading, and the
+ * recovery-aware ranking only fixed one of them. One ranking, one place.
+ *
+ * It also filtered on `!stale` where the rest of the codebase filters on
+ * `headroomIsKnown`. Those are different questions: a reading can be stale and
+ * still be a real measurement with its age attached, and a fresh reading can
+ * carry no number at all.
+ */
 export function pickTarget(reading: UsageReading, config: Config): AccountReading | null {
   const active = activeAccount(reading);
-  const candidates = reading.accounts
-    .filter((a) => a.number !== active?.number)
-    .filter((a) => !a.stale)
-    .filter((a) => a.headroomPct >= config.minTargetHeadroomPct)
-    .sort((a, b) => b.headroomPct - a.headroomPct);
-  return candidates[0] ?? null;
+  return selectTarget(reading, {
+    strategy: 'best',
+    activeNumber: active?.number ?? null,
+    minHeadroomPct: config.minTargetHeadroomPct,
+    models: config.models,
+  }).chosen;
 }
 
 function secondsBetween(fromIso: string, toIso: string): number {
