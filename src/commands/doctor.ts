@@ -15,7 +15,8 @@ import { commandExists, run } from '../core/proc.js';
 import { invalidPatterns } from '../core/secrets.js';
 import { type Store } from '../core/state.js';
 import { projectTranscriptDir } from '../core/transcripts.js';
-import { readingFromAutoStream, readingFromListOutput } from '../core/usage.js';
+import { AccountManager } from '../accounts/manager.js';
+import { headroomIsKnown } from '../core/usage.js';
 import { countRotorccHooks, installedEvents } from '../core/settingsMerge.js';
 import { readSettings, settingsPathFor } from './installHooks.js';
 
@@ -60,20 +61,17 @@ export async function runDoctor(
         },
   );
 
-  for (const program of ['git', 'cswap'] as const) {
-    const argv = config.commands[program];
+  {
+    const argv = config.commands.git;
     const ok = await commandExists(argv);
     add(
       ok
-        ? { name: program, status: 'pass', detail: argv.join(' ') }
+        ? { name: 'git', status: 'pass', detail: argv.join(' ') }
         : {
-            name: program,
+            name: 'git',
             status: 'fail',
             detail: `${argv.join(' ')} is not runnable`,
-            fix:
-              program === 'cswap'
-                ? 'Install the account switcher, or point `commands.cswap` at yours. Without it rotorcc can still checkpoint, but it cannot rotate.'
-                : 'Install git, or point `commands.git` at it.',
+            fix: 'Install git, or point `commands.git` at it.',
           },
     );
   }
@@ -106,65 +104,7 @@ export async function runDoctor(
     );
   }
 
-  // Usage source: read it for real, and cross-check the two shapes it can emit.
-  const list = await run([...config.commands.cswap, 'list', '--json'], { timeoutMs: 45_000 });
-  if (!list.ok) {
-    add({
-      name: 'usage source',
-      status: 'fail',
-      detail: (list.error ?? list.stderr).slice(0, 200),
-      fix: 'Run the switcher by hand and make sure it is logged in.',
-    });
-  } else {
-    try {
-      const reading = readingFromListOutput(JSON.parse(list.stdout), { models: config.models });
-      const active = reading.accounts.find((a) => a.active);
-      add({
-        name: 'usage source',
-        status: 'pass',
-        detail: `${reading.accounts.length} account(s); active #${active?.number ?? '?'} at ${active?.headroomPct.toFixed(0) ?? '?'}% headroom on ${active?.bindingWindow ?? '?'}`,
-      });
-
-      const auto = await run(
-        [
-          ...config.commands.cswap,
-          'auto',
-          '--once',
-          '--json',
-          '--dry-run',
-          '--threshold',
-          String(Math.max(50, Math.min(99.9, 100 - config.thresholds.rotatePct))),
-        ],
-        { timeoutMs: 60_000, okCodes: [2, 3] },
-      );
-      const crossCheck = readingFromAutoStream(auto.stdout);
-      if (crossCheck === null) {
-        add({
-          name: 'usage cross-check',
-          status: 'warn',
-          detail: 'the switcher did not emit a poll event to compare against',
-        });
-      } else {
-        const a = active?.headroomPct ?? -1;
-        const b = crossCheck.accounts.find((x) => x.active)?.headroomPct ?? -1;
-        const agree = Math.abs(a - b) <= 2;
-        add({
-          name: 'usage cross-check',
-          status: agree ? 'pass' : 'warn',
-          detail: agree
-            ? `both readings agree (${a.toFixed(0)}% headroom)`
-            : `list says ${a.toFixed(0)}% and auto says ${b.toFixed(0)}%; rotorcc uses list`,
-        });
-      }
-    } catch (err) {
-      add({
-        name: 'usage source',
-        status: 'fail',
-        detail: `output was not the expected shape: ${String(err).slice(0, 160)}`,
-        fix: 'Check the switcher version; rotorcc expects `list --json` with per-account usage windows.',
-      });
-    }
-  }
+  await checkAccounts(config, add);
 
   for (const project of config.projects) {
     const gitOk = existsSync(join(project.path, '.git'));
@@ -263,6 +203,156 @@ export async function runDoctor(
   });
 
   return checks;
+}
+
+/**
+ * The account checks.
+ *
+ * `doctor` is where "rotorcc reports confidently while doing nothing" is
+ * supposed to be caught before it costs anybody a session, so these checks are
+ * written to be noisy about ambiguity rather than tidy:
+ *
+ *   - an account whose quota could not be read is a WARN with the reason, not
+ *     a silent omission from a count;
+ *   - a live login rotorcc does not manage is a WARN, because every threshold
+ *     in this tool is about "the active account" and it would be measuring
+ *     someone else's;
+ *   - a roster with no accounts is a FAIL, because in that state rotorcc
+ *     cannot rotate at all and the operator needs to know now, not at 4%.
+ */
+async function checkAccounts(config: Config, add: (check: Check) => void): Promise<void> {
+  const manager = AccountManager.forConfig(config, {
+    ...(config.accountsDir === '' ? {} : { accountsDir: config.accountsDir }),
+  });
+
+  add({
+    name: 'account store',
+    status: 'pass',
+    detail: manager.accountsDir,
+  });
+
+  if (!manager.hasAccounts()) {
+    // The external switcher is checked ONLY here — as the migration fallback it
+    // now is, never as a dependency. A machine with rotorcc accounts of its own
+    // does not care whether it is installed.
+    const legacy = await commandExists(config.commands.cswap);
+    add({
+      name: 'accounts',
+      status: 'fail',
+      detail: legacy
+        ? 'rotorcc manages no accounts of its own; it is falling back to an external switcher'
+        : 'rotorcc manages no accounts, and there is no external switcher to fall back to',
+      fix: legacy
+        ? 'rotorcc accounts import --from-cswap   (one-off; rotorcc is standalone afterwards)'
+        : 'rotorcc accounts add   (captures the login Claude Code is using right now)',
+    });
+    return;
+  }
+
+  const active = await manager.detectActiveSlot();
+  add(
+    active.slot !== null
+      ? {
+          name: 'active account',
+          status: 'pass',
+          detail: `slot ${active.slot} (${active.reason})`,
+        }
+      : {
+          name: 'active account',
+          status: 'warn',
+          detail: active.reason,
+          fix:
+            'Every threshold rotorcc uses is about the ACTIVE account. Until this resolves, ' +
+            'it is measuring accounts it manages while the machine runs on one it does not. ' +
+            'Run "rotorcc accounts add" to bring the live login under management.',
+        },
+  );
+
+  let reading;
+  try {
+    reading = await manager.readUsage();
+  } catch (err) {
+    add({
+      name: 'quota read',
+      status: 'fail',
+      detail: String(err).slice(0, 200),
+      fix: 'rotorcc cannot see any headroom, so it will never rotate. Fix this first.',
+    });
+    return;
+  }
+
+  const known = reading.accounts.filter((a) => headroomIsKnown(a));
+  const unknown = reading.accounts.filter((a) => !headroomIsKnown(a));
+
+  add(
+    known.length > 0
+      ? {
+          name: 'quota read',
+          status: unknown.length === 0 ? 'pass' : 'warn',
+          detail:
+            `${known.length} of ${reading.accounts.length} account(s) reported headroom` +
+            (unknown.length === 0 ? '' : `; ${unknown.length} could not be measured`),
+          ...(unknown.length === 0
+            ? {}
+            : {
+                fix:
+                  'Unmeasured accounts are never rotation targets, so rotorcc has fewer places ' +
+                  'to go than it appears to. See the per-account lines below.',
+              }),
+        }
+      : {
+          name: 'quota read',
+          status: 'fail',
+          detail: 'not one account reported headroom',
+          fix:
+            'rotorcc cannot rotate onto an account it cannot measure, so in this state it will ' +
+            'never rotate at all. This is the failure that costs a session — fix it now.',
+        },
+  );
+
+  for (const account of unknown) {
+    add({
+      name: `account ${account.number}`,
+      status: 'warn',
+      detail: `headroom unknown — ${account.unknownReason ?? 'not measured'}`,
+      fix: 'Not a rotation target while this holds.',
+    });
+  }
+
+  const viable = known.filter(
+    (a) =>
+      !a.active &&
+      a.disabled !== true &&
+      a.kind !== 'api-key' &&
+      a.headroomPct >= config.minTargetHeadroomPct,
+  );
+  add(
+    viable.length > 0
+      ? {
+          name: 'rotation targets',
+          status: 'pass',
+          detail: `${viable.length} account(s) have at least ${config.minTargetHeadroomPct}% headroom`,
+        }
+      : {
+          name: 'rotation targets',
+          status: 'warn',
+          detail: `no other account has the ${config.minTargetHeadroomPct}% headroom rotorcc requires`,
+          fix:
+            'If the active account hits its threshold now, rotorcc will checkpoint and refuse ' +
+            'to rotate. That is deliberate, but it means the session ends. Add an account, ' +
+            'lower minTargetHeadroomPct, or wait for a window to reset.',
+        },
+  );
+
+  add({
+    name: 'strategy',
+    status: 'pass',
+    detail:
+      `${config.strategy}` +
+      (config.refuseRotationWithUnsavedWork
+        ? '; will refuse to rotate over work it cannot save'
+        : '; will rotate even with unsaved work (refuseRotationWithUnsavedWork is off)'),
+  });
 }
 
 export function renderDoctor(checks: Check[]): string {

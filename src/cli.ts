@@ -20,7 +20,8 @@ import {
 } from './config/load.js';
 import type { Config } from './config/schema.js';
 import { performCheckpoint } from './core/checkpoint.js';
-import { type TickContext, loop, readUsage, tick } from './core/daemon.js';
+import { type TickContext, loop, managerFor, readUsage, tick } from './core/daemon.js';
+import type { Strategy } from './accounts/select.js';
 import { Logger } from './core/log.js';
 import { renderManifestMarkdown, parseManifest } from './core/manifest.js';
 import { appPaths } from './core/paths.js';
@@ -32,6 +33,32 @@ import { runHook } from './commands/hook.js';
 import { runInit } from './commands/init.js';
 import { install, uninstall } from './commands/installHooks.js';
 import { buildStatus, renderStatus } from './commands/status.js';
+import {
+  addAccount,
+  addToken,
+  exportAccounts,
+  importAccounts,
+  importBundle,
+  listAccounts,
+  mapCommand,
+  moveAccount,
+  removeAccount,
+  setAlias,
+  setDisabled,
+  swapAccounts,
+  switchCommand,
+  unmapCommand,
+} from './commands/accounts.js';
+import { runPredict } from './commands/predict.js';
+import { runAsAccount } from './commands/runAs.js';
+import { runTui } from './tui/app.js';
+import type { ThemeMode } from './tui/theme.js';
+
+/** One place to print a usage line and return the conventional exit code. */
+function usage(out: (line: string) => void, line: string): number {
+  out(`usage: ${line}`);
+  return 1;
+}
 
 interface Argv {
   command: string;
@@ -58,6 +85,10 @@ const BOOLEAN_FLAGS = new Set([
   'clear',
   'help',
   'version',
+  'force',
+  'overwrite',
+  'from-cswap',
+  'unset',
 ]);
 
 export function parseArgv(argv: string[]): Argv {
@@ -97,20 +128,42 @@ const HELP = `rotorcc ${VERSION} — zero-loss account rotation for long Claude 
 
 usage: rotorcc <command> [options]
 
+watching
+  tui                       live dashboard: headroom, unsaved work, decisions
+  watch                     the same dashboard (alias)
+  status                    one screen, printed once
+  predict                   when the active account runs out, and how sure
+
+accounts
+  accounts [list]           every managed account with its binding window
+  accounts add              capture the login Claude Code is using right now
+  accounts add-token [-]    register a setup token or API key (- reads stdin)
+  accounts remove <ref>     forget an account and its stored credential
+  accounts alias <ref> <n>  give an account a short name (--unset to clear)
+  accounts disable <ref>    hold it out of automatic rotation
+  accounts enable <ref>     put it back
+  accounts swap <a> <b>     exchange two slots
+  accounts move <ref> <n>   put an account in a specific slot
+  accounts import           bring in accounts from another switcher (--from-cswap)
+  accounts export <path>    write a portable copy (contains real credentials)
+  switch [ref]              change account now; without a ref, pick by strategy
+  run <ref> [-- ...]        run one command as an account, this terminal only
+  map [ref] [path]          bind a directory to an account; bare form lists them
+  unmap [path]              remove a binding
+
 setup
   init [path...]            detect this machine and write a config
   install-hooks <path>      add rotorcc's hooks to a project's settings (--user for user settings)
   uninstall-hooks <path>    remove them again
   install-scheduler         run the watcher every minute (systemd / launchd / Task Scheduler)
   uninstall-scheduler       stop it
-  doctor                    check every assumption rotorcc makes
+  doctor                    check every assumption rotorcc makes, and say which are false
 
 running
   daemon [--once]           watch account headroom and act on it
   snapshot                  copy transcripts into the store now
   push-unpushed             commit and push every watched worktree now
   manifest                  write a resume manifest now
-  status                    one screen: headroom, backups, unsaved work
   resume [--clear]          print the plan from the last manifest (--clear drops raised flags)
 
 config
@@ -125,13 +178,24 @@ internal
 options
   --config <path>           use a config other than the default
   --dry-run                 evaluate and report; never commit, push, mirror or switch
-  --json                    machine-readable output where it makes sense
-  --yes                     take defaults instead of asking (init)
+  --json                    machine-readable output; on every read command
+  --yes                     take defaults, and confirm destructive actions
   --user                    act on the user settings file (install-hooks)
+  --strategy <name>         work-aware | best | next-available | consume-first
+  --model <names>           per-model weekly windows to count, or "all"
+  --theme <name>            auto | dark | light | none (tui, watch)
+  --force                   re-poll quota now, ignoring the poll floor
+  --once                    one iteration and exit (daemon, tui)
+  --slot <n>, --email <e>, --alias <a>   for accounts add / add-token
   -h, --help, -v, --version
+
+rotorcc never invents a number. An account it could not measure reports
+"unknown" with the reason, and null in --json — never 0 and never 100.
 
 The default config lives at:
   ${appPaths().configFile}
+Accounts live at:
+  ${appPaths().accountsDir}
 `;
 
 function out(line: string): void {
@@ -384,6 +448,179 @@ async function main(): Promise<number> {
       if (flags.json === true) out(JSON.stringify(report, null, 2));
       else process.stdout.write(renderStatus(report, ctx.config));
       return 0;
+    }
+
+    case 'tui':
+    case 'watch': {
+      const ctx = contextFor(flags);
+      return runTui({
+        config: ctx.config,
+        store: ctx.store,
+        manager: managerFor(ctx.config),
+        dryRun: ctx.dryRun,
+        force: flags.force === true,
+        once: flags.once === true,
+        ...(typeof flags.theme === 'string' ? { theme: flags.theme as ThemeMode } : {}),
+      });
+    }
+
+    case 'predict': {
+      const ctx = contextFor(flags);
+      return runPredict({
+        config: ctx.config,
+        store: ctx.store,
+        manager: managerFor(ctx.config),
+        json: flags.json === true,
+        force: flags.force === true,
+        out,
+      });
+    }
+
+    case 'accounts': {
+      const ctx = contextFor(flags);
+      const accountsCtx = {
+        config: ctx.config,
+        manager: managerFor(ctx.config),
+        dryRun: ctx.dryRun,
+        json: flags.json === true,
+        yes: flags.yes === true,
+        out,
+      };
+      const sub = positionals[0] ?? 'list';
+      const ref = positionals[1];
+      const numberFlag = (name: string): number | undefined => {
+        const raw = flags[name];
+        if (typeof raw !== 'string') return undefined;
+        const value = Number.parseInt(raw, 10);
+        return Number.isInteger(value) ? value : undefined;
+      };
+
+      switch (sub) {
+        case 'list':
+          return listAccounts(accountsCtx, flags.force === true);
+        case 'add':
+          return addAccount(accountsCtx, {
+            ...(numberFlag('slot') !== undefined ? { slot: numberFlag('slot') as number } : {}),
+            ...(typeof flags.email === 'string' ? { email: flags.email } : {}),
+            ...(typeof flags.alias === 'string' ? { alias: flags.alias } : {}),
+          });
+        case 'add-token':
+          return addToken(accountsCtx, {
+            ...(ref !== undefined ? { token: ref } : {}),
+            ...(numberFlag('slot') !== undefined ? { slot: numberFlag('slot') as number } : {}),
+            ...(typeof flags.email === 'string' ? { email: flags.email } : {}),
+            ...(typeof flags.alias === 'string' ? { alias: flags.alias } : {}),
+          });
+        case 'remove':
+          if (ref === undefined) return usage(out, 'rotorcc accounts remove <slot|email|alias>');
+          return removeAccount(accountsCtx, ref);
+        case 'alias': {
+          if (ref === undefined) return listAccounts(accountsCtx);
+          const name = flags.unset === true ? '--unset' : positionals[2];
+          if (name === undefined) return usage(out, 'rotorcc accounts alias <ref> <name|--unset>');
+          return setAlias(accountsCtx, ref, name);
+        }
+        case 'disable':
+        case 'enable':
+          if (ref === undefined) return usage(out, `rotorcc accounts ${sub} <slot|email|alias>`);
+          return setDisabled(accountsCtx, ref, sub === 'disable');
+        case 'swap': {
+          const other = positionals[2];
+          if (ref === undefined || other === undefined) {
+            return usage(out, 'rotorcc accounts swap <a> <b>');
+          }
+          return swapAccounts(accountsCtx, ref, other);
+        }
+        case 'move': {
+          const target = positionals[2];
+          if (ref === undefined || target === undefined) {
+            return usage(out, 'rotorcc accounts move <ref> <slot>');
+          }
+          const slot = Number.parseInt(target, 10);
+          if (!Number.isInteger(slot)) return usage(out, 'the target slot must be a number');
+          return moveAccount(accountsCtx, ref, slot);
+        }
+        case 'import':
+          return importAccounts(accountsCtx, {
+            ...(typeof flags.from === 'string' ? { from: flags.from } : {}),
+            overwrite: flags.overwrite === true,
+          });
+        case 'import-bundle':
+          if (ref === undefined) return usage(out, 'rotorcc accounts import-bundle <path>');
+          return importBundle(accountsCtx, ref);
+        case 'export':
+          if (ref === undefined) return usage(out, 'rotorcc accounts export <path>');
+          return exportAccounts(accountsCtx, ref);
+        default:
+          out(`unknown accounts command: ${sub}`);
+          return 1;
+      }
+    }
+
+    case 'switch': {
+      const ctx = contextFor(flags);
+      return switchCommand(
+        {
+          config: ctx.config,
+          manager: managerFor(ctx.config),
+          dryRun: ctx.dryRun,
+          json: flags.json === true,
+          yes: flags.yes === true,
+          out,
+        },
+        {
+          ...(positionals[0] !== undefined ? { identifier: positionals[0] } : {}),
+          strategy: (typeof flags.strategy === 'string'
+            ? flags.strategy
+            : ctx.config.strategy) as Strategy,
+          force: flags.force === true,
+        },
+      );
+    }
+
+    case 'run': {
+      const ctx = contextFor(flags);
+      return runAsAccount({
+        config: ctx.config,
+        manager: managerFor(ctx.config),
+        identifier: positionals[0],
+        argv: process.argv.slice(2),
+        dryRun: ctx.dryRun,
+        out,
+      });
+    }
+
+    case 'map': {
+      const ctx = contextFor(flags);
+      return mapCommand(
+        {
+          config: ctx.config,
+          manager: managerFor(ctx.config),
+          dryRun: ctx.dryRun,
+          json: flags.json === true,
+          yes: flags.yes === true,
+          out,
+        },
+        {
+          ...(positionals[0] !== undefined ? { identifier: positionals[0] } : {}),
+          ...(positionals[1] !== undefined ? { path: positionals[1] } : {}),
+        },
+      );
+    }
+
+    case 'unmap': {
+      const ctx = contextFor(flags);
+      return unmapCommand(
+        {
+          config: ctx.config,
+          manager: managerFor(ctx.config),
+          dryRun: ctx.dryRun,
+          json: flags.json === true,
+          yes: flags.yes === true,
+          out,
+        },
+        positionals[0],
+      );
     }
 
     case 'resume': {
