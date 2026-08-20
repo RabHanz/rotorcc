@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseArgv } from '../src/cli.js';
+import { HELP, parseArgv } from '../src/cli.js';
 
 describe('parseArgv', () => {
   it('reads a bare command', () => {
@@ -60,5 +60,48 @@ describe('parseArgv', () => {
     expect(parseArgv(['--version']).flags).toEqual({ version: true });
     expect(parseArgv(['-v']).flags).toEqual({ v: true });
     expect(parseArgv(['-h']).flags).toEqual({ h: true });
+  });
+
+  it('treats the new boolean flags as booleans, not as value-takers', () => {
+    // `--check` reading the next token as its value is the bug that makes
+    // `rotorcc upgrade --check --json` silently stop being a check.
+    expect(parseArgv(['upgrade', '--check', '--json']).flags).toEqual({
+      check: true,
+      json: true,
+    });
+    expect(parseArgv(['accounts', '--token-status', '--json']).flags).toEqual({
+      'token-status': true,
+      json: true,
+    });
+    expect(parseArgv(['accounts', 'unclaimed', '--purge', '2-a@b.com', '--yes'])).toEqual({
+      command: 'accounts',
+      positionals: ['unclaimed'],
+      flags: { purge: '2-a@b.com', yes: true },
+    });
+  });
+
+  it('keeps --purge a value flag, so it can never mean "purge everything"', () => {
+    // A `--purge` with nothing after it must not become `true` and be read as
+    // an instruction. It parses as boolean-true here, and the command layer
+    // requires a string id — but the shape is worth pinning either way.
+    expect(parseArgv(['accounts', 'unclaimed', '--purge']).flags.purge).toBe(true);
+    expect(typeof parseArgv(['accounts', 'unclaimed', '--purge', 'x']).flags.purge).toBe('string');
+  });
+});
+
+describe('the help text carries the contracts a script depends on', () => {
+  it('states the daemon --once exit codes', () => {
+    // These numbers are a public interface. If they change, this fails first.
+    expect(HELP).toContain('0  nothing to do');
+    expect(HELP).toContain('1  acted');
+    expect(HELP).toContain('2  would act, but could not');
+    expect(HELP).toContain('3  error');
+  });
+
+  it('lists the commands added for recovery and upgrade', () => {
+    expect(HELP).toContain('upgrade');
+    expect(HELP).toContain('accounts unclaimed');
+    expect(HELP).toContain('--token-status');
+    expect(HELP).toContain('purge --yes');
   });
 });

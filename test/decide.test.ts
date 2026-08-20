@@ -212,7 +212,7 @@ describe('decide — rotation disabled', () => {
   // Whether a machine may switch accounts by itself is a policy question, not a
   // threshold. With rotation off, every durability behaviour stays and the
   // switch never happens.
-  const noRotation = { ...config, rotation: { enabled: false } };
+  const noRotation = { ...config, rotation: { ...config.rotation, enabled: false } };
 
   it('never emits a rotate action, however low headroom goes', () => {
     const decision = decide(reading(1, [100, 100]), noRotation, emptyState());

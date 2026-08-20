@@ -18,7 +18,7 @@ import {
 } from '../core/state.js';
 import { PendingSwitchStore } from '../core/nextSession.js';
 import { allSessions } from '../core/transcripts.js';
-import { type UsageReading, activeAccount } from '../core/usage.js';
+import { type UsageReading, activeAccount, formatUsed, usedPctOf } from '../core/usage.js';
 import { discoverTrees } from '../core/worktrees.js';
 
 export interface StatusReport {
@@ -167,8 +167,14 @@ export async function buildStatus(
   };
 }
 
-function bar(headroomPct: number, width = 20): string {
-  const filled = Math.max(0, Math.min(width, Math.round((headroomPct / 100) * width)));
+/**
+ * A bar showing how much is SPENT, filling left to right as the window is used.
+ *
+ * There is deliberately no bar at all for an unmeasured account: an empty bar
+ * and a genuine 0% look identical, and only one of them is a measurement.
+ */
+function bar(usedPct: number, width = 20): string {
+  const filled = Math.max(0, Math.min(width, Math.round((usedPct / 100) * width)));
   return `${'#'.repeat(filled)}${'.'.repeat(width - filled)}`;
 }
 
@@ -185,17 +191,29 @@ export function renderStatus(report: StatusReport, config: Config): string {
     for (const account of report.usage.accounts) {
       const label = account.alias ?? account.email ?? `account ${account.number}`;
       const marker = account.active ? '>' : ' ';
+      const head = `  ${marker} ${String(account.number).padEnd(2)} ${label.padEnd(28)}`;
+      const used = usedPctOf(account);
+      if (used === null) {
+        // No bar and no number. This line used to render the placeholder zero
+        // as "0% left", which is the project's own cardinal rule broken on its
+        // most-read screen: an account rotorcc could not measure was displayed
+        // as an account with nothing left.
+        push(`${head} ${' '.repeat(20)} ${formatUsed(account)}`);
+        continue;
+      }
       const resets =
         account.bindingResetsAt === undefined
           ? ''
           : ` · resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`;
-      push(
-        `  ${marker} ${String(account.number).padEnd(2)} ${label.padEnd(28)} ${bar(account.headroomPct)} ${account.headroomPct.toFixed(0).padStart(3)}% left (${account.bindingWindow})${resets}`,
-      );
+      push(`${head} ${bar(used)} ${formatUsed(account)}${resets}`);
     }
     push('');
     push(
-      `  level        ${report.level}   (warn ${config.thresholds.warnPct}% · soft ${config.thresholds.softPct}% · rotate ${config.thresholds.rotatePct}%)`,
+      // The thresholds are configured as headroom REMAINING, so they are shown
+      // as the used figure they correspond to. Printing "warn 15%" beside
+      // "92% used" would read as a threshold that has not been crossed.
+      `  level        ${report.level}   (warn at ${100 - config.thresholds.warnPct}% used · ` +
+        `soft at ${100 - config.thresholds.softPct}% · rotate at ${100 - config.thresholds.rotatePct}%)`,
     );
   }
 

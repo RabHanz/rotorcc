@@ -1,2 +1,8 @@
+# esbuild arrives as a transitive dev dependency of vitest, and its install
+# script only downloads a binary that the platform package (`@esbuild/linux-x64`
+# and friends) has already provided. Declining it is deliberate: pnpm 11 treats
+# an UNDECLARED ignored build as an install failure, so leaving this unanswered
+# makes `pnpm install` — and therefore `rotorcc upgrade` — exit non-zero on a
+# tree that is perfectly fine.
 allowBuilds:
-  esbuild: set this to true or false
+  esbuild: false

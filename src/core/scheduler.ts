@@ -74,6 +74,19 @@ function systemdPlan(input: SchedulerInput, home: string): SchedulerPlan {
     'Type=oneshot',
     ...(input.path !== undefined && input.path !== '' ? [`Environment=PATH=${input.path}`] : []),
     `ExecStart=${exec}`,
+    // `daemon --once` exits 1 when it ACTED and 2 when it wanted to and could
+    // not. Both are the watcher doing its job, and without this systemd marks
+    // the unit `failed` on exactly those ticks — a red unit every time rotorcc
+    // checkpoints, and any alert on unit failure firing continuously.
+    //
+    // The cost, stated rather than hidden: node also exits 1 on an uncaught
+    // exception during module load, and that is indistinguishable here, so a
+    // watcher broken badly enough to die before it runs reports success. Two
+    // things cover it. `daemon --once` catches its own throws and exits 3, so
+    // everything after startup is honest; and `rotorcc doctor` checks when the
+    // last tick actually happened, so a silently dead watcher is visible from
+    // the one command an operator runs when something feels wrong.
+    'SuccessExitStatus=1 2',
     // A tick that hangs must not stack up behind the next one.
     'TimeoutStartSec=300',
     // This runs on a machine somebody is working on. It gets the leftovers.
@@ -177,6 +190,13 @@ function launchdPlan(input: SchedulerInput, home: string): SchedulerPlan {
     notes: [
       `Check it with: launchctl list | grep ${label}`,
       'launchd rounds StartInterval when the machine sleeps; a missed tick is caught up on wake.',
+      // launchd has no SuccessExitStatus, so a tick that ACTED (exit 1) or was
+      // blocked (2) is recorded as a non-zero exit in `launchctl list`. It has
+      // no consequence — KeepAlive is not set, so nothing restarts or backs off
+      // — but an operator reading that column should know it is the contract
+      // and not a fault.
+      'A non-zero "last exit" in launchctl list is normal: `daemon --once` exits 1 when it ' +
+        'acted and 2 when it could not. Only 3 is an error.',
     ],
   };
 }

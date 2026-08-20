@@ -15,7 +15,8 @@ import { commandExists, run } from '../core/proc.js';
 import { invalidPatterns } from '../core/secrets.js';
 import { type Store } from '../core/state.js';
 import { projectTranscriptDir } from '../core/transcripts.js';
-import { AccountManager } from '../accounts/manager.js';
+import { AccountManager, formatAge } from '../accounts/manager.js';
+import { DecisionJournal } from '../core/history.js';
 import { headroomIsKnown } from '../core/usage.js';
 import { countRotorccHooks, installedEvents } from '../core/settingsMerge.js';
 import { readSettings, settingsPathFor } from './installHooks.js';
@@ -196,6 +197,8 @@ export async function runDoctor(
     detail: `last snapshot ${state.lastSnapshotAt ?? 'never'}; latches ${Object.keys(state.latches).join(',') || 'none'}`,
   });
 
+  addWatcherFreshness(config, store, add);
+
   add({
     name: 'log',
     status: 'pass',
@@ -203,6 +206,53 @@ export async function runDoctor(
   });
 
   return checks;
+}
+
+/**
+ * When did the watcher last actually tick?
+ *
+ * The scheduler unit rotorcc installs treats exit 1 and 2 as success, because
+ * both mean the tick did its job — which makes node's own exit-1 crash look
+ * identical to a healthy run. A watcher that dies before `main` therefore shows
+ * a green unit forever, and the operator finds out weeks later that nothing was
+ * ever watched.
+ *
+ * This is the check that makes that visible. The decision journal records EVERY
+ * tick, idle ones included, precisely so "has it been running" is a question
+ * with an answer.
+ */
+function addWatcherFreshness(config: Config, store: Store, add: (check: Check) => void): void {
+  const newest = new DecisionJournal(store.dir).recent(1)[0];
+  if (newest === undefined) {
+    add({
+      name: 'watcher',
+      status: 'warn',
+      detail: 'no tick has ever been recorded',
+      fix: 'rotorcc install-scheduler, or run "rotorcc daemon --once" to check it works at all.',
+    });
+    return;
+  }
+  const ageMs = Date.now() - Date.parse(newest.at);
+  if (!Number.isFinite(ageMs)) {
+    add({ name: 'watcher', status: 'warn', detail: `last tick recorded at "${newest.at}"` });
+    return;
+  }
+  // Three intervals: one missed tick is a busy machine, three is a pattern.
+  const staleAfterMs = Math.max(3 * config.pollSeconds, 180) * 1000;
+  const age = formatAge(Math.max(0, ageMs));
+  add(
+    ageMs <= staleAfterMs
+      ? { name: 'watcher', status: 'pass', detail: `last tick ${age} ago` }
+      : {
+          name: 'watcher',
+          status: 'warn',
+          detail: `last tick ${age} ago — the watcher looks stopped`,
+          fix:
+            'The scheduler unit counts exit 1 and 2 as success, so a watcher that crashes at ' +
+            'startup still shows green. Run "rotorcc daemon --once" by hand to see the real ' +
+            'error, and check the scheduler with "rotorcc install-scheduler".',
+        },
+  );
 }
 
 /**

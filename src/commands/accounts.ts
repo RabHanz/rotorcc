@@ -22,11 +22,13 @@ import {
   type Secret,
   asSecret,
   classifyCredential,
+  credentialDiagnostics,
   credentialFingerprint,
 } from '../accounts/credentials.js';
 import { importFromCswap } from '../accounts/importCswap.js';
 import { MappingStore } from '../accounts/mappings.js';
 import {
+  type Roster,
   type RosterSlot,
   nextFreeSlot,
   normaliseAlias,
@@ -35,9 +37,11 @@ import {
   slots,
   swapSlots,
 } from '../accounts/roster.js';
+import { findUnclaimed, purgeUnclaimed } from '../accounts/unclaimed.js';
+import { claudeCredentialsPath, claudeGlobalConfigPath } from '../core/paths.js';
 import { selectTarget, type Strategy } from '../accounts/select.js';
 import { switchAccount } from '../accounts/switch.js';
-import { headroomIsKnown } from '../core/usage.js';
+import { formatUsed, headroomIsKnown, usedPctOf } from '../core/usage.js';
 import { formatAge } from '../accounts/manager.js';
 
 export interface AccountsContext {
@@ -67,9 +71,20 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
             active: a.active,
             disabled: a.disabled ?? false,
             kind: a.kind ?? 'oauth',
+            // Both figures, both named, neither inverted in place.
+            //
+            // `usedPct` is the convention every human surface now uses, and the
+            // one Anthropic's API and Claude Code's status line report in.
+            // `headroomPct` stays, unchanged in meaning, because silently
+            // inverting a field while keeping its name would make an existing
+            // consumer read 99 as "healthy" when it means "nearly gone" — a
+            // worse outcome than either convention on its own.
+            //
             // null, never 0. A consumer that sees 0 will treat it as exhausted.
+            usedPct: usedPctOf(a),
             headroomPct: headroomIsKnown(a) ? a.headroomPct : null,
             headroomKnown: headroomIsKnown(a),
+            window: headroomIsKnown(a) ? a.bindingWindow : null,
             unknownReason: headroomIsKnown(a) ? null : (a.unknownReason ?? 'not measured'),
             bindingWindow: headroomIsKnown(a) ? a.bindingWindow : null,
             bindingResetsAt: a.bindingResetsAt ?? null,
@@ -125,8 +140,7 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
         : ` · ${formatAge(account.usageAgeMs)} old`;
     ctx.out(
       `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
-        `${`${account.headroomPct.toFixed(0)}% left`.padEnd(10)} ` +
-        `(${account.bindingWindow})${resets}${age}${tags}`,
+        `${formatUsed(account).padEnd(20)}${resets}${age}${tags}`,
     );
   }
 
@@ -754,6 +768,288 @@ export function unmapCommand(ctx: AccountsContext, path?: string): number {
   const target = path ?? process.cwd();
   ctx.out(store.unset(target) ? `unmapped ${target}` : `${target} was not mapped`);
   return 0;
+}
+
+/**
+ * `rotorcc accounts unclaimed [--purge <id>]` — orphaned-credential recovery.
+ *
+ * Nothing else in rotorcc surfaces these. They are the residue of a switch or a
+ * swap that died between writing a credential and updating the roster, and the
+ * only two honest things to do with one are "put it back" and "delete it on
+ * purpose". Both need an operator to see it first, which is what this is.
+ */
+export function unclaimedAccounts(ctx: AccountsContext, options: { purge?: string } = {}): number {
+  const roster = ctx.manager.roster.read();
+
+  if (options.purge !== undefined) return purgeOneUnclaimed(ctx, roster, options.purge);
+
+  const entries = findUnclaimed(ctx.manager.accountsDir, roster);
+
+  if (ctx.json) {
+    ctx.out(
+      JSON.stringify(
+        {
+          accountsDir: ctx.manager.accountsDir,
+          unclaimed: entries,
+          // Said in the JSON as well as on screen: a consumer that treats an
+          // empty list as "the store is clean" would be wrong on macOS.
+          keychainNotEnumerated: process.platform === 'darwin',
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+
+  if (entries.length === 0) {
+    ctx.out('no orphaned credentials: every stored credential belongs to an account in the roster');
+    if (process.platform === 'darwin') {
+      ctx.out('');
+      ctx.out(
+        '  note: this scans the credential FILES only. On macOS a stash can also live in the',
+      );
+      ctx.out(
+        '  Keychain, and there is no way to list those without a prompt, so an orphan held only',
+      );
+      ctx.out('  in the Keychain would not appear here.');
+    }
+    return 0;
+  }
+
+  ctx.out(`${entries.length} orphaned credential(s) in ${ctx.manager.accountsDir}:`);
+  ctx.out('');
+  for (const entry of entries) {
+    ctx.out(`  ${entry.id}`);
+    ctx.out(
+      `      slot ${entry.slot ?? '?'}   ${entry.email ?? 'login unknown'}` +
+        (entry.emailIsExact ? '' : ' (from the filename, so possibly approximate)'),
+    );
+    ctx.out(`      ${entry.detail}`);
+    // "expired" vs "expires" is the difference between an operator purging a
+    // dead credential and purging a working login that only needed moving back.
+    // An orphan minutes old has an expiry in the FUTURE.
+    const expiry =
+      entry.accessTokenExpiresAt === null
+        ? ''
+        : `   access token ${Date.parse(entry.accessTokenExpiresAt) <= Date.now() ? 'expired' : 'expires'} ` +
+          entry.accessTokenExpiresAt.slice(0, 16).replace('T', ' ');
+    ctx.out(`      ${entry.kind}   ${entry.fingerprint ?? 'no fingerprint'}${expiry}`);
+    ctx.out(
+      `      last written ${entry.modifiedAt?.slice(0, 16).replace('T', ' ') ?? 'unknown'}` +
+        (entry.ageMs === null ? '' : ` (${formatAge(entry.ageMs)} ago)`) +
+        `, ${entry.files.length} file(s), ${entry.bytes} bytes`,
+    );
+    ctx.out('');
+  }
+  ctx.out('These are real logins. Two ways to deal with one:');
+  ctx.out('');
+  ctx.out('  put it back      rotorcc accounts import-bundle …, or re-add the login and switch');
+  ctx.out('  delete it        rotorcc accounts unclaimed --purge <id> --yes');
+  ctx.out('');
+  ctx.out('There is no bulk purge, and there will not be one.');
+  if (process.platform === 'darwin') {
+    ctx.out('');
+    ctx.out(
+      '  note: credential FILES only — a Keychain-held orphan cannot be listed without a prompt.',
+    );
+  }
+  return 0;
+}
+
+function purgeOneUnclaimed(ctx: AccountsContext, roster: Roster, id: string): number {
+  const entries = findUnclaimed(ctx.manager.accountsDir, roster);
+  const entry = entries.find((candidate) => candidate.id === id);
+  if (entry === undefined) {
+    ctx.out(`nothing unclaimed matches "${id}".`);
+    if (entries.length > 0) {
+      ctx.out('These are the ids that exist:');
+      for (const candidate of entries) ctx.out(`  ${candidate.id}`);
+    }
+    ctx.out('');
+    ctx.out('Ids are exact. There is no pattern matching here on purpose.');
+    return 1;
+  }
+
+  // Enumerate, then require confirmation — the same shape as `accounts remove`,
+  // for the same reason: a credential is not recoverable from a mistake.
+  if (!ctx.yes) {
+    ctx.out(`this deletes ${entry.files.length} file(s):`);
+    for (const file of entry.files) ctx.out(`  ${file}`);
+    ctx.out('');
+    ctx.out(
+      `That is a real login (${entry.email ?? 'unknown'}, ${entry.fingerprint ?? 'no fingerprint'}). ` +
+        'If it is the only copy, it is gone.',
+    );
+    ctx.out(`Re-run with --yes:  rotorcc accounts unclaimed --purge ${entry.id} --yes`);
+    return 1;
+  }
+  if (ctx.dryRun) {
+    ctx.out(
+      `DRY RUN — would delete ${entry.files.length} file(s) for ${entry.id}. Nothing written.`,
+    );
+    return 0;
+  }
+
+  const result = purgeUnclaimed(ctx.manager.accountsDir, roster, entry.id);
+  if (!result.ok) {
+    ctx.out(result.detail);
+    return 1;
+  }
+  for (const file of result.removed) ctx.out(`  removed  ${file}`);
+  ctx.out(`purged ${entry.id}`);
+  return 0;
+}
+
+/**
+ * `rotorcc accounts --token-status` — where each credential came from, and what
+ * state its token is in.
+ *
+ * rotorcc already reads three separate stores to work out what is active. This
+ * shows what it found in each, which is the difference between "my account will
+ * not switch" and "the keychain answered and the file is a generation behind".
+ *
+ * **No token is ever printed.** Fingerprints, states, expiries and store names
+ * only — see `credentialDiagnostics`, which is the only thing allowed to turn a
+ * credential into words.
+ */
+export async function tokenStatus(ctx: AccountsContext): Promise<number> {
+  const store = ctx.manager.credentials;
+  const active = await store.readActive();
+  const now = Date.now();
+
+  const live =
+    active.kind === 'found'
+      ? {
+          state: 'found' as const,
+          source: LIVE_SOURCE_LABELS[active.backend],
+          path: liveSourcePath(active.backend, store.env),
+          degraded: active.degraded,
+          ...credentialDiagnostics(active.value, now),
+        }
+      : { state: active.kind, detail: active.kind === 'unreadable' ? active.detail : null };
+
+  const detected = await ctx.manager.detectActiveSlot();
+
+  const stashes = [];
+  for (const slot of slots(ctx.manager.roster.read())) {
+    const stash = await store.readStash(slot.slot, slot.email);
+    stashes.push({
+      slot: slot.slot,
+      email: slot.email,
+      alias: slot.alias === '' ? null : slot.alias,
+      active: detected.slot === slot.slot,
+      source:
+        stash.kind === 'found'
+          ? stash.backend === 'keychain'
+            ? 'macOS Keychain (rotorcc item)'
+            : 'rotorcc credential file'
+          : null,
+      state: stash.kind,
+      detail: stash.kind === 'unreadable' ? stash.detail : null,
+      ...(stash.kind === 'found' ? credentialDiagnostics(stash.value, now) : {}),
+    });
+  }
+
+  if (ctx.json) {
+    ctx.out(
+      JSON.stringify(
+        { live, activeSlot: detected.slot, activeDetection: detected.reason, accounts: stashes },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+
+  ctx.out('LIVE CREDENTIAL — what Claude Code will use on its next launch');
+  if (live.state !== 'found') {
+    ctx.out(
+      `  ${live.state === 'absent' ? 'none: no Claude Code credential on this machine' : `unreadable: ${live.detail ?? ''}`}`,
+    );
+  } else {
+    ctx.out(`  source        ${live.source}`);
+    ctx.out(`                ${live.path}`);
+    ctx.out(`  kind          ${live.kind}`);
+    ctx.out(`  fingerprint   ${live.fingerprint ?? 'none'}`);
+    ctx.out(`  token         ${describeTokenState(live.tokenState, live.expiresInSeconds)}`);
+    ctx.out(
+      `  refresh       ${live.refreshable ? 'a refresh token is present' : 'NO refresh token — this login cannot be renewed'}`,
+    );
+    if (live.subscriptionType !== null) ctx.out(`  plan          ${live.subscriptionType}`);
+    if (live.degraded) {
+      ctx.out(
+        '  DEGRADED      read from a fallback store, so it may be a generation behind. rotorcc',
+      );
+      ctx.out('                will refuse to refresh or capture it in this state.');
+    }
+  }
+  ctx.out('');
+  ctx.out(`  active slot   ${detected.slot ?? 'not identified'} — ${detected.reason}`);
+  ctx.out('');
+
+  ctx.out('STORED CREDENTIALS — one per managed account');
+  if (stashes.length === 0) ctx.out('  rotorcc manages no accounts yet.');
+  for (const entry of stashes) {
+    const label = entry.alias ?? entry.email;
+    ctx.out(`  ${entry.active ? '>' : ' '} ${String(entry.slot).padEnd(3)} ${label}`);
+    if (entry.state !== 'found') {
+      ctx.out(
+        `        ${entry.state === 'absent' ? 'no stored credential — re-add this account' : `unreadable: ${entry.detail ?? ''}`}`,
+      );
+      continue;
+    }
+    ctx.out(`        source       ${entry.source ?? 'unknown'}`);
+    ctx.out(`        kind         ${entry.kind ?? 'unknown'}   ${entry.fingerprint ?? ''}`);
+    ctx.out(
+      `        token        ${describeTokenState(entry.tokenState ?? 'not-an-oauth-login', entry.expiresInSeconds ?? null)}`,
+    );
+    ctx.out(
+      `        refresh      ${entry.refreshable === true ? 'present' : 'NONE — this login cannot be renewed'}`,
+    );
+  }
+  ctx.out('');
+  ctx.out('No token is printed here, ever. Fingerprints are truncated hashes of the refresh');
+  ctx.out('token, which is what makes two generations of one login compare equal.');
+  return 0;
+}
+
+const LIVE_SOURCE_LABELS: Record<'keychain' | 'file' | 'config', string> = {
+  keychain: 'macOS Keychain (Claude Code item)',
+  file: "Claude Code's credentials file",
+  config: "Claude Code's global config (primaryApiKey)",
+};
+
+function liveSourcePath(backend: 'keychain' | 'file' | 'config', env: NodeJS.ProcessEnv): string {
+  switch (backend) {
+    case 'keychain':
+      return 'service "Claude Code-credentials"';
+    case 'file':
+      return claudeCredentialsPath(env);
+    case 'config':
+      return claudeGlobalConfigPath(env);
+  }
+}
+
+function describeTokenState(state: string, expiresInSeconds: number | null): string {
+  const relative =
+    expiresInSeconds === null
+      ? ''
+      : expiresInSeconds >= 0
+        ? ` (${formatAge(expiresInSeconds * 1000)} left)`
+        : ` (${formatAge(-expiresInSeconds * 1000)} ago)`;
+  switch (state) {
+    case 'valid':
+      return `valid${relative}`;
+    case 'expiring-soon':
+      return `expiring within five minutes${relative} — rotorcc will refresh it on the next poll`;
+    case 'expired':
+      return `EXPIRED${relative} — rotorcc will refresh it on the next poll`;
+    case 'no-expiry-recorded':
+      return 'no expiry recorded (a setup token, or a shape rotorcc does not parse)';
+    default:
+      return 'not an OAuth login — nothing to expire';
+  }
 }
 
 function requireSlot(ctx: AccountsContext, identifier: string): RosterSlot | null {

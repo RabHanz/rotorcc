@@ -13,8 +13,12 @@ PATTERNS=(
   'VentureOS'
   'venturectl'
   'ventureos'
-  'RabHanz'
-  'rabhanz'
+  # The GitHub owner handle is deliberately NOT in this list. It is the
+  # package's own published identity — package.json's repository, homepage and
+  # bugs fields point at it, npm renders all three, and a package whose source
+  # cannot be found is a package nobody should install. Everything below is
+  # different: private hosts, private projects, and personal accounts that have
+  # no business being in a public tool.
   'onnyx'
   'signzart'
   'rabeehanzla'

@@ -252,6 +252,47 @@ export const configSchema = z.object({
   rotation: z
     .object({
       enabled: z.boolean().default(true),
+      /**
+       * How a rotation is carried out. See `docs/adr/0003-live-credential-hot-swap.md`.
+       *
+       *   hotswap    change the credential under the LIVE session and let it
+       *              keep running. No successor, no new pane, no lost context.
+       *              A Claude Code session reads its credential per request, so
+       *              the next request uses the new account — measured, not
+       *              assumed, on 2026-08-19 against v2.1.235.
+       *   successor  the older abandon-and-replace path: checkpoint, switch,
+       *              and launch a replacement session pointed at the manifest.
+       *              Kept fully working, because hot-swap is an undocumented
+       *              behaviour of a client nobody here controls and it may stop
+       *              being true in any release.
+       *   auto       the default. Hot-swap, verify it took, and fall back to a
+       *              successor on EVIDENCE that it did not — never merely on
+       *              the absence of evidence that it did, because falling back
+       *              means replacing a session that is very likely still fine.
+       */
+      mode: z.enum(['auto', 'hotswap', 'successor']).default('auto'),
+      /**
+       * How long to watch the live session for an authentication failure after
+       * a hot swap before calling it good. Zero disables the watch, which also
+       * disables `auto`'s ability to detect a failed swap.
+       *
+       * CLAMPED to two minutes, not rejected above it. The watch runs inside
+       * the tick, which holds rotorcc's lock, so a generous-looking 600 would
+       * make every hook-driven checkpoint and every later tick decline for ten
+       * minutes and `rotorcc upgrade` refuse.
+       *
+       * Clamped rather than validated because a bound introduced in an upgrade
+       * must not turn a config that worked yesterday into one that will not
+       * parse: every command loads the config, so the scheduled tick would then
+       * die every minute — and the reason it died would be a validation error
+       * about a field nobody had touched.
+       */
+      hotswapVerifySeconds: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(20)
+        .transform((value) => Math.min(value, 120)),
     })
     .default({}),
 

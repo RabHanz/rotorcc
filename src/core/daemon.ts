@@ -27,6 +27,7 @@ import {
   decideHardKill,
 } from './decide.js';
 import { PendingSwitchStore } from './nextSession.js';
+import { hotSwapAccount } from './hotswap.js';
 import { evaluatePolicy, renderStopNotice, weeklyHeadroom } from './policy.js';
 import {
   performCheckpoint,
@@ -65,6 +66,78 @@ export interface TickResult {
   actionsTaken: string[];
   hardKill: 'limit-signature' | 'dead-process' | null;
   detail: string;
+  /**
+   * Set when the tick never ran because another rotorcc operation held the lock.
+   *
+   * A separate field rather than a string match on `detail`, because the exit
+   * code a cron job branches on turns on this fact and matching prose is how
+   * that quietly stops working the first time somebody reworded a message.
+   */
+  skippedForLock?: boolean;
+}
+
+/**
+ * What `rotorcc daemon --once` exits with.
+ *
+ * A watcher that always exits 0 tells a cron job nothing, and one that exits 1
+ * for both "I rotated your account" and "I could not read anything" tells it
+ * something worse than nothing. Four codes, in increasing order of "a human
+ * should look":
+ *
+ * | code | meaning                                                            |
+ * | ---- | ------------------------------------------------------------------ |
+ * |  `0` | nothing to do — headroom is fine and rotorcc changed nothing        |
+ * |  `1` | acted — warned, checkpointed, queued a handover, or switched        |
+ * |  `2` | would act, but could not — refused, blocked, exhausted, lock held   |
+ * |  `3` | error — the tick could not complete, or an action it started failed |
+ *
+ * Precedence is error, then blocked, then acted, then nothing: a tick that
+ * checkpointed AND refused to rotate is a `2`, because the refusal is the part
+ * an operator has to decide about.
+ *
+ * Under `--dry-run` the code reports what rotorcc *would* have done. Nothing is
+ * written on that path, which is the point of being able to ask.
+ */
+export const EXIT_NOTHING_TO_DO = 0;
+export const EXIT_ACTED = 1;
+export const EXIT_BLOCKED = 2;
+export const EXIT_ERROR = 3;
+
+export type TickExitCode = 0 | 1 | 2 | 3;
+
+/**
+ * Action markers that mean a step rotorcc actually started did not finish.
+ *
+ * These live inside an otherwise successful tick — `tick()` returns `ok: true`
+ * because the tick itself completed — so without them a failed account switch
+ * would exit 1 ("acted") and read to a cron job as a healthy rotation.
+ */
+const FAILED_ACTION_MARKERS = new Set([
+  'switch-failed',
+  'successor:failed',
+  // A hot swap that failed with no fallback left to try. Distinct from the
+  // plain `hotswap-failed` that precedes `fallback:successor`, because that one
+  // is followed by an attempt which may well succeed — and reporting an error
+  // for a rotation that then worked is its own kind of lie.
+  'hotswap-abandoned',
+]);
+
+export function exitCodeFor(result: TickResult): TickExitCode {
+  if (!result.ok) return EXIT_ERROR;
+  if (result.actionsTaken.some((action) => FAILED_ACTION_MARKERS.has(action))) return EXIT_ERROR;
+
+  // Both sources matter. `actionsTaken` carries a `blocked:` entry when the
+  // action ran this tick; `decision.actions` still carries one when the tick was
+  // latched and deliberately did nothing — which is the all-accounts-exhausted
+  // case, where reporting "nothing to do" every minute would be the exact
+  // failure this project keeps having.
+  const blocked =
+    result.skippedForLock === true ||
+    result.actionsTaken.some((action) => action.startsWith('blocked')) ||
+    (result.decision?.actions.some((action) => action.kind === 'blocked') ?? false);
+  if (blocked) return EXIT_BLOCKED;
+
+  return result.actionsTaken.length > 0 ? EXIT_ACTED : EXIT_NOTHING_TO_DO;
 }
 
 /**
@@ -313,6 +386,54 @@ async function rotate(
   // handing them a document whose every row says "would commit" is how a
   // simulation gets presented as a rescue.
   effects.manifestPath = ctx.dryRun ? null : checkpoint.manifestPath;
+
+  // ---------------------------------------------------------------------
+  // Hot swap: move the LIVE session to the new account and let it carry on.
+  //
+  // Only when the session is actually alive — `hardKill !== null` means the
+  // process is gone, and there is nothing to swap under. Everything below this
+  // block is the successor path, which is reached when hot-swap is disabled,
+  // not applicable, or tried and shown to have failed.
+  //
+  // See docs/adr/0003-live-credential-hot-swap.md.
+  // ---------------------------------------------------------------------
+  const mode = config.rotation.mode;
+  const canHotSwap = mode !== 'successor' && hardKill === null && session !== null;
+  if (canHotSwap) {
+    const swap = await hotSwapAccount({
+      config,
+      logger,
+      targetSlot: action.targetAccount,
+      transcriptPath: session?.transcriptPath,
+      dryRun: ctx.dryRun,
+    });
+    logger.info('hot swap', { verdict: swap.verdict, detail: swap.detail });
+
+    if (swap.verdict !== 'failed') {
+      // Done. No ROTATE_NOW — that flag tells an agent to wrap up and hand over
+      // to a replacement, and there is no replacement: it is still the same
+      // session, on a different account, mid-task.
+      taken.push(
+        ctx.dryRun ? `dry-run-hotswap:${action.targetAccount}` : `hotswap:${action.targetAccount}`,
+      );
+      taken.push(`hotswap-${swap.verdict}`);
+      return taken;
+    }
+
+    if (mode === 'hotswap') {
+      // The operator asked for hot-swap and nothing else. Falling back to a
+      // successor here would replace a session they told rotorcc not to touch.
+      logger.error('hot swap failed and rotation.mode is "hotswap"; not launching a successor', {
+        detail: swap.detail,
+      });
+      taken.push('hotswap-abandoned');
+      return taken;
+    }
+
+    logger.warn('hot swap failed; falling back to the successor path', { detail: swap.detail });
+    taken.push('hotswap-failed');
+    taken.push('fallback:successor');
+  }
 
   // A dry run does not raise a live flag. On 2026-08-18 one that did was read
   // by the UserPromptSubmit hook hours later, on a healthy session with 72%
@@ -908,6 +1029,7 @@ export async function tick(ctx: TickContext): Promise<TickResult> {
       actionsTaken: [],
       hardKill: null,
       detail: 'another rotorcc operation holds the lock; skipping this tick',
+      skippedForLock: true,
     };
   }
 

@@ -19,10 +19,12 @@ const tree: TreeStatus = {
   protectedBranch: false,
   dirtyFiles: 3,
   ahead: 2,
+  behind: 0,
   hasRemote: true,
   remote: 'origin',
   upstream: 'origin/work/feature-a',
   tip: 'abc1234 add the thing',
+  headSha: 'abc1234000000000000000000000000000000000',
   midOperation: null,
   isMainTree: false,
 };
@@ -168,7 +170,11 @@ describe('renderManifestMarkdown', () => {
   it('names every branch, its tip and its push state', () => {
     expect(markdown).toContain('work/feature-a');
     expect(markdown).toContain('abc1234 add the thing');
-    expect(markdown).toContain('committed + pushed');
+    // "committed" would send a reader looking for these changes in the branch's
+    // history, where they deliberately are not: a checkpoint lives on a rotorcc
+    // ref and the branch was left exactly where the agent put it.
+    expect(markdown).toContain('checkpointed + pushed');
+    expect(markdown).toContain('refs/rotorcc/checkpoints');
   });
 
   it('warns that background tasks do not survive the switch', () => {

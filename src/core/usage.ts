@@ -134,6 +134,39 @@ export function headroomIsKnown(account: AccountReading): boolean {
   return account.headroomKnown ?? !account.stale;
 }
 
+/**
+ * How much of the binding window has been SPENT, or null when unmeasured.
+ *
+ * rotorcc used to report headroom — how much is left — everywhere. Anthropic's
+ * own API reports utilisation, Claude Code's status line reports utilisation,
+ * and so an operator glancing at two screens had to invert one of them in their
+ * head at exactly the moment they were trying to decide something quickly. That
+ * mismatch produced a mislabelled table on 2026-08-19, and the convention was
+ * the defect rather than the person reading it.
+ *
+ * Null, never 0 and never 100, when the account could not be measured. An
+ * inversion is the easiest place in the world to turn an unknown into a
+ * confident "100% used", and that would be the same defect wearing a new sign.
+ */
+export function usedPctOf(account: AccountReading): number | null {
+  if (!headroomIsKnown(account)) return null;
+  return Math.max(0, Math.min(100, 100 - account.headroomPct));
+}
+
+/**
+ * The one way an account's headline figure is written, everywhere.
+ *
+ * Always carries the window. A bare percentage is ambiguous — "1%" of a
+ * five-hour window and "1%" of a week are different situations and only one of
+ * them is a problem — and that ambiguity has now caused two reporting errors in
+ * one day. There is no form of this function that omits the window.
+ */
+export function formatUsed(account: AccountReading): string {
+  const used = usedPctOf(account);
+  if (used === null) return `unknown (${account.unknownReason ?? 'not measured'})`;
+  return `${used.toFixed(0)}% used (${account.bindingWindow})`;
+}
+
 export interface UsageReading {
   observedAt: string;
   activeAccountNumber: number | null;

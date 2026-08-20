@@ -150,6 +150,84 @@ export function accessTokenExpired(expiresAt: unknown, nowMs = Date.now()): bool
 }
 
 /**
+ * Everything that can safely be said about a credential without revealing it.
+ *
+ * This is the whole vocabulary the diagnostics surface is allowed to use. It
+ * exists as one function so the rule — fingerprints and states, never bytes —
+ * is enforced in a single place rather than re-decided at every call site, and
+ * so a field that would leak something is a change to this type rather than an
+ * innocent-looking `console.log` somewhere else.
+ */
+export interface CredentialDiagnostics {
+  kind: CredentialKind;
+  /** A truncated hash. Stable across access-token rotation. Never the token. */
+  fingerprint: string | null;
+  /** ISO expiry of the access token, when the credential carries one. */
+  expiresAt: string | null;
+  /** How the access token stands right now. */
+  tokenState: 'valid' | 'expiring-soon' | 'expired' | 'no-expiry-recorded' | 'not-an-oauth-login';
+  /** Seconds until expiry; negative once past. Null when there is no expiry. */
+  expiresInSeconds: number | null;
+  /**
+   * Whether a refresh is even possible. An OAuth credential with no refresh
+   * token cannot be renewed — it is a session with an end date, and knowing
+   * that in advance is the difference between a planned re-login and a dead
+   * account discovered mid-rotation.
+   */
+  refreshable: boolean;
+  scopes: string[];
+  subscriptionType: string | null;
+}
+
+export function credentialDiagnostics(value: string, nowMs = Date.now()): CredentialDiagnostics {
+  const kind = classifyCredential(value);
+  const fingerprint = credentialFingerprint(value);
+  const payload = oauthPayload(value);
+
+  if (payload === null) {
+    return {
+      kind,
+      fingerprint,
+      expiresAt: null,
+      tokenState: 'not-an-oauth-login',
+      expiresInSeconds: null,
+      refreshable: false,
+      scopes: [],
+      subscriptionType: null,
+    };
+  }
+
+  const expiresAt =
+    typeof payload.expiresAt === 'number' && Number.isFinite(payload.expiresAt)
+      ? payload.expiresAt
+      : null;
+  const remainingMs = expiresAt === null ? null : expiresAt - nowMs;
+
+  return {
+    kind,
+    fingerprint,
+    expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
+    tokenState:
+      expiresAt === null
+        ? 'no-expiry-recorded'
+        : (remainingMs as number) <= 0
+          ? 'expired'
+          : accessTokenExpired(expiresAt, nowMs)
+            ? 'expiring-soon'
+            : 'valid',
+    expiresInSeconds: remainingMs === null ? null : Math.round(remainingMs / 1000),
+    refreshable: typeof payload.refreshToken === 'string' && payload.refreshToken !== '',
+    scopes: Array.isArray(payload.scopes)
+      ? payload.scopes.filter((s) => typeof s === 'string')
+      : [],
+    subscriptionType:
+      typeof payload.subscriptionType === 'string' && payload.subscriptionType !== ''
+        ? payload.subscriptionType
+        : null,
+  };
+}
+
+/**
  * Sibling keys of `claudeAiOauth` that belong to the MACHINE rather than to the
  * account: MCP OAuth state and plugin secrets rotate independently of any
  * account and are shared by every login on the box. On activation the live
@@ -230,7 +308,14 @@ export interface CredentialStoreOptions {
  * here is what makes the dangerous half small enough to read in one sitting.
  */
 export class CredentialStore {
-  private readonly env: NodeJS.ProcessEnv;
+  /**
+   * Public so a caller can NAME the file it read from using the same
+   * environment the read used. Resolving that path against `process.env`
+   * instead would print a path that was not the one consulted — under
+   * `rotorcc run`, or any redirected `CLAUDE_CONFIG_DIR`, a diagnostic that
+   * names the wrong file is worse than one that names none.
+   */
+  readonly env: NodeJS.ProcessEnv;
   private readonly platform: string;
   private readonly credentialsDir: string;
   /**

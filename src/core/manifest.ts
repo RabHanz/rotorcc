@@ -199,8 +199,15 @@ export function renderManifestMarkdown(manifest: Manifest): string {
     (t) => t.checkpoint?.committed === true && t.checkpoint.pushed !== true,
   );
   const stuck = allTrees.filter((t) => t.checkpoint?.error !== null && t.checkpoint !== null);
-  push(`- Committed and pushed: ${pushed.length} tree(s).`);
-  push(`- Committed, not pushed: ${committed.length} tree(s).`);
+  // "Committed" would be a lie now, and a consequential one: a reader would go
+  // looking for those changes in the branch's history and not find them. A
+  // checkpoint lives on `refs/rotorcc/checkpoints/<branch>` and the branch was
+  // deliberately left where the agent put it.
+  push(`- Pushed the agent's own commits: ${pushed.length} tree(s).`);
+  push(
+    `- Uncommitted work saved to a rotorcc checkpoint ref: ${committed.length} tree(s). ` +
+      'Recover one with: git checkout refs/rotorcc/checkpoints/<branch> -- .',
+  );
   push(`- Failed to checkpoint: ${stuck.length} tree(s).`);
   push(
     `- Transcript snapshot: ${manifest.snapshot.filesCopied} file(s), ${bytes(manifest.snapshot.bytesCopied)} new, commit \`${manifest.snapshot.commit ?? 'none'}\` in \`${manifest.snapshot.storePath}\`.`,
@@ -257,7 +264,7 @@ export function renderManifestMarkdown(manifest: Manifest): string {
             ? `ERROR: ${cp.error}`
             : cp.skipped !== null
               ? cp.skipped
-              : `${cp.committed ? 'committed' : 'clean'}${cp.pushed ? ' + pushed' : ''}`;
+              : `${cp.committed ? 'checkpointed' : 'clean'}${cp.pushed ? ' + pushed' : ''}`;
       push(
         `| \`${tree.path}\` | ${tree.branch}${tree.protectedBranch ? ' (protected)' : ''} | ${tree.tip || '—'} | ${tree.ahead ?? '?'} | ${tree.dirtyFiles} | ${state} |`,
       );

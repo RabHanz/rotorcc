@@ -371,7 +371,9 @@ describe('the dashboard never draws a number it does not have', () => {
       width: 200,
     });
     const row = lines.find((l) => l.includes('a2@example.com')) ?? '';
-    expect(row).toContain('45%');
+    // 45% headroom is 55% USED — the convention every surface reports in, and
+    // the one Anthropic's API and Claude Code's status line already use.
+    expect(row).toContain('55% used');
     expect(row).toContain('█');
   });
 

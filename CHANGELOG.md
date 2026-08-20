@@ -3,6 +3,163 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — rotation without replacing the session
+
+### Fixed — the checkpoint sweep damaged working branches (P0, 2026-08-19)
+
+Three incidents in one night, one root cause: **`git add -A && git commit` on
+somebody else's working tree, at a moment nobody chose, is not a checkpoint. It
+is an edit.**
+
+1. It committed a stale worktree over newer work on one branch three times in
+   forty minutes and pushed each time — a loop, not a race: committing advanced
+   the branch, advancing the branch re-dirtied the stale tree, and the next
+   sweep committed it again.
+2. It silently reverted another branch, wiping a review artifact, a test file
+   and four fixes.
+3. It committed an agent's **in-flight source** across three packages while the
+   matching tests were still unstaged, and pushed that as the branch tip. The
+   result was half a change: the branch went red, with no explanation attached
+   to it, and the agent who owned the branch had not written that commit and did
+   not know it existed.
+
+Nothing was ultimately lost, but only because people noticed. That is not a
+safety property.
+
+**A checkpoint is now recoverable, not authoritative.** It never touches the
+branch. rotorcc builds a commit object from the working tree using a _temporary_
+index — `read-tree`, `add -A`, `write-tree`, `commit-tree`, `update-ref` — so the
+agent's index, files and branch are all untouched, and records it under
+`refs/rotorcc/checkpoints/<branch>`. That ref is outside `refs/heads` and
+`refs/remotes`: it is not a branch, it does not appear in `git branch`, it is
+never pushed, CI never sees it, and no later sweep can build a stale tree on top
+of it. Recover one with
+`git checkout refs/rotorcc/checkpoints/<branch> -- .`.
+
+Pushing is now only ever about commits the **agent** made.
+
+`git stash create` was the obvious tool and is the wrong one: it excludes
+untracked files, which for an agent writing a new module is most of the work.
+
+This also settles "never checkpoint a worktree that is not yours": a checkpoint
+that writes only a ref cannot damage another agent's tree.
+
+Two further guards, kept because they are cheap and catch different things:
+
+- **A plan is void if the tree moved under it.** `inspectTree` records the exact
+  HEAD it read; `checkpointTree` re-reads HEAD immediately before staging and
+  refuses if it changed. Every fact the sweep acts on may be seconds old —
+  discovery inspects four trees at a time with a transcript snapshot in between.
+- **A push must be a genuine fast-forward, checked here.** The upstream must be
+  an ancestor of the local tip. Leaving it to the server means the bad commit
+  already exists and the operator gets a push error to decode instead of a
+  refusal that names the problem.
+
+A tree that is behind still gets its dirty work **committed** — durability is
+the point — it just never gets published over the newer history.
+
+### Fixed — the selector ranked incomparable windows (P0)
+
+`headroomPct` is the _binding_ window's headroom, and the binding window differs
+per account, so `sort by headroomPct` compared "10% of a week" with "1% of five
+hours" as though they were one quantity. On the live reading that exposed it,
+rotorcc ranked an account whose week is nearly gone — and does not recover for
+five days — above one whose only constraint was a five-hour window resetting in
+twenty minutes, after which it still held 28% of its week.
+
+Ranking is now on the **weekly budget** (the resource an operator regrets
+spending, which is the judgement ADR 0002 already made) with **readiness** as
+the gate: the 5-hour window has room now, or resets inside the planning horizon.
+An unready account ranks last rather than being excluded. An unknown reset time
+makes an account unready, never "probably back soon".
+
+`decide.ts`'s `pickTarget` was a second selector with its own sort, so the
+watcher and `rotorcc switch` could choose differently from one reading. It now
+delegates to `selectTarget`.
+
+### Changed — rotation happens under the live session (see ADR 0003)
+
+ADR 0002 asserted that a Claude Code process reads its credential once at launch,
+so a new process was the only rotation there was. **That was never tested, and
+it is false.** A session reads its credential per request: swapping in an invalid
+token failed the very next turn, restoring a good one recovered in place with the
+conversation intact, and swapping in a _different account's_ credential let the
+same conversation continue and complete a full generation. Method and
+observations in [ADR 0003](docs/adr/0003-live-credential-hot-swap.md).
+
+- `rotation.mode` is `auto` | `hotswap` | `successor`, defaulting to `auto`.
+- **hotswap** changes the credential under the running session. No successor, no
+  new pane, no cold start, no lost context, and the duplicate-session hazard
+  cannot arise because no second process exists.
+- **successor** is the old path, kept fully working and **not deprecated**.
+  Hot-swap is undocumented behaviour of a client nobody here controls; deleting
+  the fallback would mean rotation breaks silently on the day it changes.
+- **auto** verifies and then falls back — on _evidence of failure_, never on the
+  absence of evidence of success. A session that made no request during the
+  watch is reported `unobserved`, not `verified`, and is not replaced for it.
+- The swap is `switchAccount`, unchanged, not a quick write of
+  `.credentials.json`. The same experiment found `/status` keeps naming the OLD
+  account when only that file moves, because the identity block lives in
+  `~/.claude.json`. A session on one account while every surface names another
+  is this project's signature defect in a new hat.
+- The liveness gate is untouched: a successor still never launches beside a live
+  predecessor.
+
+### Changed — rotorcc reports what has been USED, not what is left
+
+Anthropic's API reports utilisation and so does Claude Code's status line;
+rotorcc reported headroom, so comparing two screens meant inverting one in your
+head. That produced a mislabelled table. Every human surface now shows used —
+and **always with the window**, because `99% (5h)` returns within the hour and
+`99% (7d)` does not, and a bare `99%` cannot tell them apart.
+
+- Thresholds print in the same direction as the numbers beside them: "warn at
+  85% used", not "warn 15%".
+- **`--json` is additive.** `usedPct` and `window` are new; `headroomPct` keeps
+  its original meaning. Inverting a field while keeping its name would make an
+  existing consumer read `99` as healthy when it means nearly gone.
+- Found while doing it: `renderStatus` printed `headroomPct` with no
+  `headroomIsKnown` guard, so an unmeasurable account appeared as "0% left" on
+  the most-read screen in the tool. It now draws no bar and no number.
+
+### Added
+
+- **`rotorcc upgrade [--check]`** — detects whether this machine has a package
+  install or a git checkout and does the right thing for each. Fast-forward only;
+  refuses a dirty tree, a diverged branch, a detached HEAD, an untracked branch,
+  or a checkout whose `dist/` is not what PATH resolves to. The build is staged
+  and published by rename, so a failed build never touches the live `dist/`, and
+  the upgrade holds rotorcc's tick lock so a watcher tick declines loudly instead
+  of running against half-installed files. Verification runs through the **new**
+  binary, because a check made by the old process is a check of the build that
+  was just replaced.
+- **`rotorcc accounts unclaimed [--purge <id>]`** — surfaces credentials the
+  roster no longer claims, with slot, login, age, fingerprint and the reason.
+  Purge is by exact id and needs `--yes`; there is no bulk form.
+- **`rotorcc purge`** — enumerates every path it would delete, with sizes and
+  with what is irreversible marked, and deletes nothing without `--yes`. Claude
+  Code's own credential, config and home are listed under "NOT touched".
+- **`rotorcc accounts --token-status`** — which store each credential came from,
+  its expiry, and whether it can be refreshed. Fingerprints and states only; no
+  token is ever printed.
+- **`daemon --once` exit codes**: `0` nothing to do, `1` acted, `2` would act but
+  could not, `3` error. Documented in `--help` and the README and pinned by
+  tests. A tick skipped because another operation held the lock is a `2`, never
+  a `0` — it did not look, so it cannot say there was nothing to see.
+  **Breaking**: `1` previously meant "error".
+- npm publishing metadata, and a `prepublishOnly` that runs the leak audit, the
+  typecheck, the whole suite and a fresh build.
+
+### Fixed — `pnpm install` failed on a perfectly good tree
+
+pnpm 11 treats an undeclared ignored build script as an install **failure**, and
+`pnpm-workspace.yaml` still carried the placeholder pnpm writes when it asks. So
+every script that runs a dependency check first — which is all of them — failed
+on a tree that was completely fine. `rotorcc upgrade` also names that specific
+failure, with its fix, rather than reporting it as generic install noise.
+
+**572 tests, up from 445.**
+
 ## Unreleased — native account ownership
 
 rotorcc now owns its whole account layer: it stores its own logins, reads quota

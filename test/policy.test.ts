@@ -368,7 +368,7 @@ describe('rule 3 — when everything is spent, STOP', () => {
 });
 
 describe('rotation.enabled = false', () => {
-  const disabled = { ...config, rotation: { enabled: false } };
+  const disabled = { ...config, rotation: { ...config.rotation, enabled: false } };
 
   it('does not queue a handover, but still names where to go', () => {
     const action = evaluatePolicy({
