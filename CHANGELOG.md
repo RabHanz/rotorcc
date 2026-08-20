@@ -5,15 +5,46 @@ this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.2.0] — rotation without replacing the session
 
-### Fixed — a data-loss defect in the sweep (P0, 2026-08-19)
+### Fixed — the checkpoint sweep damaged working branches (P0, 2026-08-19)
 
-The checkpoint sweep committed a **stale worktree over newer work** on one
-branch three times in forty minutes and pushed each time. The shape was a loop
-rather than a one-off race: committing advanced the branch, advancing the branch
-re-dirtied the stale tree, and the next sweep committed it again. The branch
-survived only because a human's push happened to land last.
+Three incidents in one night, one root cause: **`git add -A && git commit` on
+somebody else's working tree, at a moment nobody chose, is not a checkpoint. It
+is an edit.**
 
-Two guards, both cheap, both structural:
+1. It committed a stale worktree over newer work on one branch three times in
+   forty minutes and pushed each time — a loop, not a race: committing advanced
+   the branch, advancing the branch re-dirtied the stale tree, and the next
+   sweep committed it again.
+2. It silently reverted another branch, wiping a review artifact, a test file
+   and four fixes.
+3. It committed an agent's **in-flight source** across three packages while the
+   matching tests were still unstaged, and pushed that as the branch tip. The
+   result was half a change: the branch went red, with no explanation attached
+   to it, and the agent who owned the branch had not written that commit and did
+   not know it existed.
+
+Nothing was ultimately lost, but only because people noticed. That is not a
+safety property.
+
+**A checkpoint is now recoverable, not authoritative.** It never touches the
+branch. rotorcc builds a commit object from the working tree using a _temporary_
+index — `read-tree`, `add -A`, `write-tree`, `commit-tree`, `update-ref` — so the
+agent's index, files and branch are all untouched, and records it under
+`refs/rotorcc/checkpoints/<branch>`. That ref is outside `refs/heads` and
+`refs/remotes`: it is not a branch, it does not appear in `git branch`, it is
+never pushed, CI never sees it, and no later sweep can build a stale tree on top
+of it. Recover one with
+`git checkout refs/rotorcc/checkpoints/<branch> -- .`.
+
+Pushing is now only ever about commits the **agent** made.
+
+`git stash create` was the obvious tool and is the wrong one: it excludes
+untracked files, which for an agent writing a new module is most of the work.
+
+This also settles "never checkpoint a worktree that is not yours": a checkpoint
+that writes only a ref cannot damage another agent's tree.
+
+Two further guards, kept because they are cheap and catch different things:
 
 - **A plan is void if the tree moved under it.** `inspectTree` records the exact
   HEAD it read; `checkpointTree` re-reads HEAD immediately before staging and

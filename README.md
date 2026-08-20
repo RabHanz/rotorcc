@@ -137,9 +137,26 @@ above with the refusals, the staged build and the verification.
 
 **Continuous durability.** Hooks on `Stop`, `SubagentStop`, `PreCompact` and
 `SessionEnd` copy every session transcript into a git repository rotorcc owns,
-then commit and push every watched worktree. Transcripts are append-only, so
-after the first snapshot each one costs a few kilobytes. The heavy half runs in
-a detached process, so a hook never makes you wait on a git push.
+and save every watched worktree's uncommitted work. Transcripts are append-only,
+so after the first snapshot each one costs a few kilobytes. The heavy half runs
+in a detached process, so a hook never makes you wait on a git push.
+
+**A checkpoint is recoverable, not authoritative.** It never becomes a commit on
+your branch. rotorcc writes a commit object from the working tree using a
+temporary index — your index, your files and your branch are untouched — and
+records it at `refs/rotorcc/checkpoints/<branch>`. That is not a branch, does
+not show up in `git branch`, is never pushed, and CI never sees it. Get the work
+back with:
+
+```bash
+git checkout refs/rotorcc/checkpoints/<branch> -- .
+```
+
+The only thing rotorcc pushes is commits **you** made and had not pushed yet.
+This is the direct consequence of three incidents on 2026-08-19 in which the old
+"commit everything dirty and push it" sweep committed a stale tree over newer
+work, silently reverted a branch, and published an agent's half-finished change
+— source without its tests — as a branch tip.
 
 **Rotation happens under the running session.** A Claude Code session reads its
 credential from disk on **every request**, not once at launch — measured on

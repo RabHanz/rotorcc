@@ -85,10 +85,10 @@ write the file quickly" would.
 
 `rotation.mode` takes three values, defaulting to `auto`:
 
-| mode        | what happens                                                             |
-| ----------- | ------------------------------------------------------------------------ |
-| `hotswap`   | swap the credential under the live session; it keeps running             |
-| `successor` | the ADR 0002 path: checkpoint, switch, replace a dead session            |
+| mode        | what happens                                                              |
+| ----------- | ------------------------------------------------------------------------- |
+| `hotswap`   | swap the credential under the live session; it keeps running              |
+| `successor` | the ADR 0002 path: checkpoint, switch, replace a dead session             |
 | `auto`      | attempt hotswap, **verify it took**, fall back to successor if it did not |
 
 The reason for keeping both is not caution for its own sake. **Hot-swap is an

@@ -484,7 +484,7 @@ async function main(): Promise<number> {
                 ? `ERROR ${outcome.error}`
                 : outcome.skipped !== null
                   ? `skipped: ${outcome.skipped}`
-                  : `${outcome.committed ? 'committed' : 'clean'}${outcome.pushed ? ' + pushed' : ''}`;
+                  : `${outcome.committed ? 'checkpointed' : 'clean'}${outcome.pushed ? ' + pushed' : ''}`;
             out(`  ${outcome.branch.padEnd(40)} ${state}`);
           }
         }
