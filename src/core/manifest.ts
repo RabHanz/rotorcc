@@ -327,8 +327,18 @@ export function renderManifestMarkdown(manifest: Manifest): string {
   for (const account of manifest.accounts.list) {
     const cell = (name: string): string => {
       const window = account.windows.find((w) => w.name === name);
-      if (window === undefined || window.usedPct === null) return 'unknown';
-      return `${window.usedPct.toFixed(0)}%`;
+      if (window !== undefined) {
+        return window.usedPct === null ? 'unknown' : `${window.usedPct.toFixed(0)}%`;
+      }
+      // A manifest written before per-window spend was recorded carries one
+      // figure and the window it belonged to. Rendering that as `unknown`
+      // would throw away a measurement that is right there in the file — and
+      // this document's whole job is to be readable six weeks later.
+      if (account.bindingWindow === name) {
+        if (account.usedPct !== null) return `${account.usedPct.toFixed(0)}%`;
+        if (account.headroomPct !== null) return `${(100 - account.headroomPct).toFixed(0)}%`;
+      }
+      return 'unknown';
     };
     const extra = account.windows
       .filter((w) => w.name !== '5h' && w.name !== '7d')

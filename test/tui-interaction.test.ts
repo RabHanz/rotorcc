@@ -256,6 +256,58 @@ describe('one action at a time', () => {
     expect(handleKey('w', busy, context()).state.overlay.kind).toBe('why');
     expect(handleKey('q', busy, context()).intent.kind).toBe('quit');
   });
+
+  it('cannot be walked around through an overlay', () => {
+    // The hole this closes: the overlay branches sit above the per-key busy
+    // check, so with a switch in flight `w` opened the why panel, `c` opened a
+    // checkpoint confirmation, and `y` launched a second action. Nothing was
+    // corrupted — the tick lock caught it — but the operator got a failure
+    // report for an action they had confirmed, and the second outcome cleared
+    // `busy` while the first was still running.
+    const viaWhy = press(['w', 'c', 'y'], context(), busy);
+    expect(viaWhy.intents.every((i) => i.kind !== 'run')).toBe(true);
+    expect(viaWhy.state.note).toContain('one action at a time');
+    expect(viaWhy.state.overlay.kind).toBe('none');
+
+    const viaFlags = press(['w', 'x', 'y'], context({ flagsRaised: true }), busy);
+    expect(viaFlags.intents.every((i) => i.kind !== 'run')).toBe(true);
+
+    // And a confirmation that was already open when the action started cannot
+    // be answered into a second run either.
+    const stale: UiState = {
+      ...busy,
+      overlay: {
+        kind: 'confirm',
+        action: { kind: 'checkpoint', label: 'checkpoint' },
+        prompt: ['?'],
+      },
+    };
+    expect(handleKey('y', stale, context()).intent.kind).toBe('none');
+    expect(handleKey(ENTER, stale, context()).intent.kind).toBe('none');
+  });
+});
+
+describe('seeing the last result again', () => {
+  const done = {
+    ok: true,
+    title: 'checkpoint every watched tree',
+    lines: ['3 checkpointed · 1 pushed · 2 SKIPPED · 0 failed', 'a', 'b', 'c', 'd', 'e'],
+    at: '2026-08-20T01:00:00Z',
+    dryRun: false,
+  };
+
+  it('opens the full output on o, because the pane only shows the first few lines', () => {
+    // A checkpoint that skipped two trees is a SUCCESS whose detail decides
+    // whether it is safe to rotate. Without this the detail was unreachable.
+    const state = handleKey('o', { ...initialUiState(), lastOutcome: done }, context()).state;
+    expect(state.overlay).toEqual({ kind: 'outcome', outcome: done });
+  });
+
+  it('says so plainly when nothing has run yet', () => {
+    const state = handleKey('o', initialUiState(), context()).state;
+    expect(state.overlay.kind).toBe('none');
+    expect(state.note).toContain('no action has run yet');
+  });
 });
 
 describe('what counts as one key press', () => {

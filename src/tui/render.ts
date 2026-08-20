@@ -318,10 +318,31 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   }
 
   if (ui !== undefined && ui.overlay.kind !== 'none') {
-    return [
-      ...lines.slice(0, reportStartsAt),
-      ...overlayLines(ui, model, c, width).map((line) => truncateVisible(line, width)),
-    ];
+    const panel = overlayLines(ui, model, c, width).map((line) => truncateVisible(line, width));
+    let head = lines.slice(0, reportStartsAt);
+    // The panel is what the operator has to read and answer, so it is the part
+    // that must fit. `app.ts` trims the frame to the window, so appending the
+    // panel to a head taller than the terminal pushed the question — and the
+    // `y / cancel` line under it — off the bottom on a short screen with a lot
+    // of accounts. The accounts above it lose lines instead; they are context,
+    // and the panel already carries the numbers the question turns on.
+    const height = options.height;
+    if (height !== undefined) {
+      const room = Math.max(1, height - 2);
+      if (head.length + panel.length > room) {
+        // Keep the two header lines whatever happens; drop account rows from
+        // the bottom up, and say how many are not shown rather than silently
+        // ending the list.
+        const keep = Math.max(2, room - panel.length - 1);
+        if (head.length > keep) {
+          head = [
+            ...head.slice(0, keep),
+            c.dim(`  … ${head.length - keep} more line(s) above the panel`),
+          ];
+        }
+      }
+    }
+    return [...head, ...panel];
   }
 
   return lines;
@@ -432,6 +453,7 @@ function helpBody(c: Palette): string[] {
     row('f', 'force a quota re-poll, ignoring the poll floor'),
     row('p', 'pause / resume the background refresh'),
     row('w', 'why has nothing happened — and what to do about it'),
+    row('o', "the last action's full output"),
     row('q', 'quit'),
     '',
     c.dim('acting — each one asks first, and shows you what it did'),
@@ -715,6 +737,6 @@ export function footer(c: Palette, state: { paused: boolean; readOnly?: boolean 
   }
   return c.dim(
     `↑↓ pick · enter switch · b rotate best · d disable · f re-poll · t strategy · ` +
-      `w why · ? keys · p ${state.paused ? 'resume' : 'pause'} · q quit`,
+      `w why · o last result · ? keys · p ${state.paused ? 'resume' : 'pause'} · q quit`,
   );
 }

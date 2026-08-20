@@ -105,8 +105,11 @@ describe('formatUsed', () => {
 describe('rotorcc status', () => {
   it('reports used, with the window, and a bar that fills as it is spent', () => {
     const text = renderStatus(report([measured(1, 20)]), testConfig());
-    expect(text).toContain('80% used');
-    expect(text).toContain('5h');
+    // On ONE line, together. Two independent `toContain` checks would pass with
+    // the figure in one column block and the window name in another, which is
+    // the exact defect — a percentage whose window has to be inferred.
+    const line = text.split('\n').find((l) => l.includes('80% used')) ?? '';
+    expect(line).toMatch(/5h\s.*80% used/);
     expect(text).not.toContain('% left');
     // 80% used is a mostly-full bar.
     expect(text).toMatch(/#{7,}\.{0,3}/);

@@ -42,8 +42,24 @@ export interface ActionContext {
   now?: () => Date;
 }
 
-/** How long a TUI action will wait behind a stale lock before breaking it. */
-const LOCK_STALE_SECONDS = 300;
+/**
+ * The staleness a TUI action allows before it will break somebody else's lock.
+ *
+ * Effectively never. `Store.acquireLock` breaks a held lock for either of two
+ * reasons: the owning process is gone, or the lock is older than this. The
+ * first is correct and desirable — a killed watcher must not block a keypress
+ * forever. The second is a guess, and the guess is wrong in exactly the case
+ * that matters: a tick holds this lock for its whole decide-and-act phase,
+ * which includes a checkpoint sweep with pushes over every watched worktree,
+ * and that can legitimately run for minutes on a slow network. A keypress that
+ * declared such a lock stale would switch credentials underneath a tick that is
+ * itself mid-switch, which is the precise failure the lock exists to prevent.
+ *
+ * So the pid check is the only thing allowed to break a lock here. A living
+ * holder is waited for — which in this UI means "refused, try again", because
+ * the operator is standing there and a frozen pane is not an answer.
+ */
+const LOCK_STALE_SECONDS = Number.MAX_SAFE_INTEGER;
 
 function outcome(
   ctx: ActionContext,
@@ -67,20 +83,34 @@ function outcome(
  * the one screen that could have explained the failure.
  */
 export async function runAction(ctx: ActionContext, action: PendingAction): Promise<ActionOutcome> {
-  if (!ctx.store.acquireLock('tick', LOCK_STALE_SECONDS)) {
-    return outcome(ctx, action, false, [
-      'another rotorcc operation holds the lock, so nothing was done.',
-      'The watcher ticks every minute and holds it while it acts; try again in a moment.',
-    ]);
-  }
+  // The lock acquisition and the release are INSIDE the guard, not around it.
+  // Both touch the filesystem and both can throw — a read-only or full state
+  // directory, an EACCES on the lock — and a throw escaping this function is
+  // not a visible failure: the caller's `busy` flag never clears, so every
+  // subsequent key is refused with "an action is still running" for the rest of
+  // the session, with nothing drawn to say why.
+  let locked = false;
   try {
+    locked = ctx.store.acquireLock('tick', LOCK_STALE_SECONDS);
+    if (!locked) {
+      return outcome(ctx, action, false, [
+        'another rotorcc operation holds the lock, so nothing was done.',
+        'The watcher ticks every minute and holds it while it acts; try again in a moment.',
+      ]);
+    }
     return await perform(ctx, action);
   } catch (err) {
     return outcome(ctx, action, false, [
-      `the action threw: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400),
+      `the action failed: ${err instanceof Error ? err.message : String(err)}`.slice(0, 400),
     ]);
   } finally {
-    ctx.store.releaseLock('tick');
+    if (locked) {
+      try {
+        ctx.store.releaseLock('tick');
+      } catch {
+        /* `releaseLock` already swallows the ordinary cases; this is the rest */
+      }
+    }
   }
 }
 
@@ -167,23 +197,40 @@ async function perform(ctx: ActionContext, action: PendingAction): Promise<Actio
         dryRun: ctx.dryRun,
       });
       let failed = 0;
+      let skipped = 0;
+      let saved = 0;
+      let pushed = 0;
+      const detail: string[] = [];
       for (const project of result.projects) {
         for (const item of project.outcomes) {
           if (item.error !== null) failed += 1;
+          else if (item.skipped !== null) skipped += 1;
+          else if (item.committed) saved += 1;
+          if (item.pushed) pushed += 1;
           const state =
             item.error !== null
               ? `ERROR ${item.error}`
               : item.skipped !== null
                 ? `skipped: ${item.skipped}`
                 : `${item.committed ? 'checkpointed' : 'clean'}${item.pushed ? ' + pushed' : ''}`;
-          out(`${item.branch.padEnd(40)} ${state}`);
+          detail.push(`${item.branch.padEnd(40)} ${state}`);
         }
       }
+      // The summary goes FIRST, because the pane shows the first few lines and
+      // an operator who cannot see that two trees were skipped will rotate
+      // believing everything was saved. A skip is not an error — a protected
+      // branch is a legitimate refusal — but it is exactly the thing that has
+      // to survive being summarised.
+      out(
+        `${saved} checkpointed · ${pushed} pushed · ${skipped} SKIPPED · ${failed} failed` +
+          (skipped > 0 ? '  — the skipped ones hold work rotorcc did not save' : ''),
+      );
       const snapshot = result.snapshot;
       if (snapshot !== null) {
         out(`snapshot: ${snapshot.filesCopied} file(s), ${snapshot.bytesCopied} new byte(s)`);
       }
-      if (lines.length === 0) out('no watched tree had anything to save');
+      for (const line of detail) out(line);
+      if (detail.length === 0) out('no watched tree had anything to save');
       return outcome(ctx, action, failed === 0, lines);
     }
 

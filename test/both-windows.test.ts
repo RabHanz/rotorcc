@@ -407,6 +407,40 @@ describe('the dashboard', () => {
     expect(text).not.toMatch(/idle\s+67%/);
   });
 
+  it('keeps an open panel inside a short terminal, dropping accounts instead', () => {
+    // `app.ts` trims the frame to the window. A panel appended below eight
+    // account rows on a 24-row terminal put the question — and the line saying
+    // which key answers it — off the bottom, so the operator would be
+    // confirming something they could not read.
+    const many = Array.from({ length: 8 }, (_, i) =>
+      incidentAccount({ number: i + 1, alias: `acct${i + 1}`, active: i === 0 }),
+    );
+    const ui = {
+      cursor: 1,
+      overlay: {
+        kind: 'confirm' as const,
+        action: { kind: 'switch' as const, slot: 2, label: 'switch to slot 2' },
+        prompt: Array.from({ length: 11 }, (_, i) => `prompt line ${i}`),
+      },
+      paused: false,
+      busy: null,
+      lastOutcome: null,
+      note: null,
+    };
+    const height = 24;
+    const lines = renderDashboard(dashboard(many), {
+      palette: colours,
+      width: 120,
+      height,
+      ui,
+    });
+    const visible = lines.slice(0, Math.max(1, height - 2)).join('\n');
+    expect(visible).toContain('switch to slot 2');
+    expect(visible).toContain('prompt line 10');
+    // The key that answers it has to be on screen too.
+    expect(visible).toContain('cancel');
+  });
+
   it('draws no cursor and no panel when there is no keyboard', () => {
     // `--once`, and anything piped, render a read-only frame. A frame going
     // into a cron mail has no cursor, and must not look like a control surface.
@@ -499,6 +533,33 @@ describe('the resume manifest', () => {
     expect(markdown).not.toContain('| 0% | 0% |');
   });
 
+  it('re-renders an older manifest from the one figure it does carry', () => {
+    // A 0.2.0 manifest records `{headroomPct, bindingWindow}` and no per-window
+    // list. Printing `unknown` for a window whose measurement is right there in
+    // the file throws away the very thing the rescue document exists to hold.
+    const old = parseManifest({
+      ...(JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>),
+      accounts: {
+        activeNumber: 1,
+        targetNumber: null,
+        observedAt: '2026-08-20T01:00:00Z',
+        list: [
+          {
+            number: 1,
+            label: 'primary',
+            headroomPct: 4,
+            bindingWindow: '5h',
+            resetsAt: null,
+            active: true,
+          },
+        ],
+      },
+    });
+    const markdown = renderManifestMarkdown(old);
+    // 4% headroom on 5h is 96% of it spent, and the week was never recorded.
+    expect(markdown).toContain('| 96% | unknown |');
+  });
+
   it('still parses a manifest written before windows were recorded', () => {
     // Old manifests carried one headroom figure and no window list. They must
     // keep opening: a rescue document that will not load is worse than a
@@ -523,7 +584,9 @@ describe('the resume manifest', () => {
     });
     expect(old.accounts.list[0]?.windows).toEqual([]);
     expect(old.accounts.list[0]?.headroomPct).toBe(4);
-    expect(renderManifestMarkdown(old)).toContain('| unknown | unknown |');
+    // Its binding window's figure survives; the one it never recorded does not
+    // get invented. See the test above.
+    expect(renderManifestMarkdown(old)).toContain('| 96% | unknown |');
   });
 });
 

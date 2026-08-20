@@ -251,7 +251,20 @@ export async function runTui(options: TuiOptions): Promise<number> {
           void gather({ ignorePause: true, force: result.intent.force });
           break;
         case 'run':
-          void perform(result.intent.action);
+          // `runAction` is written not to throw, and this is the belt for that
+          // brace: a rejection escaping here would leave `busy` latched and
+          // every subsequent key refused with "an action is still running",
+          // for the rest of the session, with nothing on screen to say why.
+          void perform(result.intent.action).catch((err: unknown) => {
+            ui = applyOutcome(ui, {
+              ok: false,
+              title: result.intent.kind === 'run' ? result.intent.action.label : 'action',
+              lines: [`the action failed: ${err instanceof Error ? err.message : String(err)}`],
+              at: new Date().toISOString(),
+              dryRun: options.dryRun,
+            });
+            draw();
+          });
           break;
         case 'none':
           break;

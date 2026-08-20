@@ -14,7 +14,7 @@
  * lose a login, so every mutating action takes rotorcc's own tick lock first
  * and reports plainly when it could not.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -268,6 +268,46 @@ describe('the tick lock', () => {
     await runAction(w.ctx, action({ kind: 'set-disabled', slot: 2, disabled: true, label: 'x' }));
     expect(w.store.acquireLock('tick', 600)).toBe(true);
     w.store.releaseLock('tick');
+  });
+
+  it('never steals a lock whose owner is alive, however long it has been held', async () => {
+    const w = await world();
+    // A tick holds this lock for its whole decide-and-act phase, which includes
+    // a checkpoint sweep with pushes across every watched worktree. That can
+    // legitimately run for minutes. A keypress that declared such a lock stale
+    // would switch credentials underneath a tick that is itself mid-switch.
+    expect(w.store.acquireLock('tick', 600)).toBe(true);
+    const lockDir = join(w.store.dir, 'locks', 'tick');
+    // Backdate it well past any plausible staleness window.
+    const old = new Date(Date.now() - 6 * 3_600_000);
+    utimesSync(lockDir, old, old);
+    // The owner recorded in it is this process, which is alive.
+    writeFileSync(join(lockDir, 'owner'), `${process.pid}\n${old.toISOString()}\n`, 'utf8');
+
+    const outcome = await runAction(
+      w.ctx,
+      action({ kind: 'switch', slot: 2, label: 'switch to slot 2' }),
+    );
+    expect(outcome.ok).toBe(false);
+    expect(outcome.lines.join('\n')).toContain('holds the lock');
+    expect(w.manager.roster.read().activeSlot).toBe(1);
+  });
+
+  it('does take over a lock whose owner is gone, so a killed watcher cannot block a key', async () => {
+    const w = await world();
+    expect(w.store.acquireLock('tick', 600)).toBe(true);
+    // A pid that cannot exist: the lock's owner is definitively not running.
+    writeFileSync(
+      join(w.store.dir, 'locks', 'tick', 'owner'),
+      `2147483646\n${new Date().toISOString()}\n`,
+      'utf8',
+    );
+    const outcome = await runAction(
+      w.ctx,
+      action({ kind: 'set-disabled', slot: 2, disabled: true, label: 'disable slot 2' }),
+    );
+    expect(outcome.ok).toBe(true);
+    expect(w.manager.roster.read().accounts['2']?.disabled).toBe(true);
   });
 
   it('releases it even when the action throws', async () => {

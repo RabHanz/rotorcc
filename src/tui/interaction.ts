@@ -212,8 +212,39 @@ function clearFlagsPrompt(): string[] {
  *
  * Returns the next state and at most one intent. The caller performs the
  * intent; nothing in this file touches the world.
+ *
+ * The single-flight rule is enforced HERE rather than at each key, and that is
+ * the whole reason this wrapper exists. It used to be one check placed among
+ * the action keys, which the overlays walked straight past: with a switch in
+ * flight, `w` opened the why panel, `c` opened a checkpoint confirmation and
+ * `y` launched it, because the overlay branches sit above that check. Nothing
+ * was corrupted — the tick lock caught it — but the operator got a failure
+ * report for an action they had confirmed, and `busy` was cleared by the second
+ * action's outcome while the first was still running.
+ *
+ * A rule with one exception is a rule with none. Any key that would start an
+ * action while one is running is refused, whatever path it arrived by.
  */
 export function handleKey(
+  key: string,
+  state: UiState,
+  context: KeyContext,
+): { state: UiState; intent: Intent } {
+  const result = route(key, state, context);
+  if (result.intent.kind === 'run' && state.busy !== null) {
+    return {
+      state: {
+        ...state,
+        overlay: { kind: 'none' },
+        note: `"${state.busy}" is still running — one action at a time`,
+      },
+      intent: NOTHING,
+    };
+  }
+  return result;
+}
+
+function route(
   key: string,
   state: UiState,
   context: KeyContext,
@@ -338,6 +369,19 @@ export function handleKey(
   }
   if (key === '?') return { state: { ...base, overlay: { kind: 'help' } }, intent: NOTHING };
   if (key === 'w') return { state: { ...base, overlay: { kind: 'why' } }, intent: NOTHING };
+  if (key === 'o') {
+    // The last action's FULL output. The pane shows the first few lines under
+    // the accounts, which is right for a glance and wrong for the case that
+    // matters: a checkpoint that skipped two trees is a success whose detail
+    // decides whether it is safe to rotate.
+    if (base.lastOutcome === null) {
+      return { state: { ...base, note: 'no action has run yet' }, intent: NOTHING };
+    }
+    return {
+      state: { ...base, overlay: { kind: 'outcome', outcome: base.lastOutcome } },
+      intent: NOTHING,
+    };
+  }
   if (key === 'p') return { state: { ...base, paused: !base.paused }, intent: NOTHING };
   if (UP_KEYS.has(key)) {
     return { state: { ...base, cursor: clampCursor(cursor - 1, count) }, intent: NOTHING };
