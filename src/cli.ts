@@ -40,7 +40,7 @@ import { runDoctor, renderDoctor } from './commands/doctor.js';
 import { runHook } from './commands/hook.js';
 import { runInit } from './commands/init.js';
 import { install, uninstall } from './commands/installHooks.js';
-import { buildStatus, renderStatus } from './commands/status.js';
+import { buildStatus, renderStatus, statusJson } from './commands/status.js';
 import {
   addAccount,
   addToken,
@@ -156,8 +156,8 @@ export const HELP = `rotorcc ${VERSION} — zero-loss account rotation for long 
 
 usage: rotorcc <command> [options]
 
-watching
-  tui                       live dashboard: headroom, unsaved work, decisions
+watching and driving
+  tui                       live dashboard you can act from (see the keys below)
   watch                     the same dashboard (alias)
   status                    one screen, printed once
   predict                   when the active account runs out, and how sure
@@ -221,6 +221,25 @@ options
   --once                    one iteration and exit (daemon, tui)
   --slot <n>, --email <e>, --alias <a>   for accounts add / add-token
   -h, --help, -v, --version
+
+keys in "rotorcc tui" / "rotorcc watch"
+  ↑↓ / j k                  move between accounts
+  enter, s                  switch to the selected account now
+  b                         rotate to the best target now, by the current strategy
+  d                         disable / enable the selected account
+  t                         change the rotation strategy
+  f                         force a quota re-poll, ignoring the poll floor
+  r                         refresh the screen without spending a quota request
+  w                         why has nothing happened — and act on it from there
+  o                         the last action's full output
+  p / ? / q                 pause · keys · quit
+Every acting key runs the same code as the matching command — enter is
+"rotorcc switch", d is "rotorcc accounts disable", t is "rotorcc config set
+strategy" — asks before it acts, and shows the result in the pane. A run whose
+stdout is not a terminal, and "--once", render one read-only frame with no keys.
+
+Every account row shows BOTH windows, 5h and 7d, each labelled and each as the
+share that has been USED. Which one binds is marked as well, never instead.
 
 exit codes for "daemon --once", so a cron job can branch on them
   0  nothing to do          headroom is fine; rotorcc changed nothing
@@ -513,7 +532,7 @@ async function main(): Promise<number> {
     case 'status': {
       const ctx = contextFor(flags);
       const report = await buildStatus(ctx.config, ctx.store, readUsage);
-      if (flags.json === true) out(JSON.stringify(report, null, 2));
+      if (flags.json === true) out(JSON.stringify(statusJson(report), null, 2));
       else process.stdout.write(renderStatus(report, ctx.config));
       return 0;
     }
@@ -521,10 +540,23 @@ async function main(): Promise<number> {
     case 'tui':
     case 'watch': {
       const ctx = contextFor(flags);
+      // A file-only logger, deliberately. The dashboard owns the alternate
+      // screen; a log line arriving on stderr mid-frame draws itself across the
+      // account table and stays there until the next redraw. Everything the
+      // acting keys do is still logged, in the same file every other command
+      // writes to.
+      const logger = new Logger({
+        file: ctx.config.logging.file === '' ? appPaths().logFile : ctx.config.logging.file,
+        level: flags.verbose === true ? 'debug' : ctx.config.logging.level,
+        maxBytes: ctx.config.logging.maxBytes,
+        console: false,
+      });
       return runTui({
         config: ctx.config,
         store: ctx.store,
         manager: managerFor(ctx.config),
+        logger,
+        configPath: ctx.configPath,
         dryRun: ctx.dryRun,
         force: flags.force === true,
         once: flags.once === true,

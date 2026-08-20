@@ -1,3 +1,7 @@
+# Both forms. `node_modules/` matches a directory and NOT a symlink of that
+# name, so a worktree that symlinks its dependencies at the real checkout got
+# the LINK committed — a dangling absolute path in anybody else's clone.
+node_modules
 node_modules/
 dist/
 coverage/

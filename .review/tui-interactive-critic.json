@@ -1,0 +1,94 @@
+{
+  "status": "reviewed",
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "round": 1,
+  "base": "work/close-cswap-gaps",
+  "head": "work/tui-interactive",
+  "note": "Blind critic per the project's fallback procedure: a fresh headless process was given `git diff <base>...<head>` and the review contract, and nothing else — no commit messages, no PR body, no author reasoning, no prior verdict, and no statement of who or what wrote the diff. This is a weaker independence guarantee than a different vendor's model and is recorded as such. Codex was NOT run; its subscription is out.",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/tui/interaction.ts",
+      "line": 283,
+      "summary": "The single-flight rule is bypassed: the `why` overlay is handled before the `busy` check, so a second mutating action can be confirmed and launched while the first is still in flight.",
+      "failure_scenario": "Press `s` then `y` — `busy` is set and `perform()` starts. Press `w`: the global `w` branch sits above the busy refusal, so the why panel opens. Press `c`: the `case 'why'` branch opens a checkpoint confirm without consulting `busy`. Press `y`: the confirm branch returns `{kind:'run'}` and overwrites `busy`. app.ts starts a second action while the first is mid-flight. The tick lock catches it, so the second reports \"another rotorcc operation holds the lock\" as a FAILED overlay for an action the operator did confirm — and `applyOutcome` clears `busy` while the first is still running, so a third can start. `w` → `x` → `y` reaches the same hole.",
+      "disposition": "accepted, fixed",
+      "fix": "`handleKey` is now a wrapper around the routing function: any result carrying a `run` intent while the PREVIOUS state was busy is refused, whatever path it arrived by, and the overlay is closed. The per-key check stays for the nicer message on the direct keys. Test: 'cannot be walked around through an overlay' in test/tui-interaction.test.ts, which drives w→c→y, w→x→y, and answering a confirmation that was already open when the first action started."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/actions.ts",
+      "line": 46,
+      "summary": "`LOCK_STALE_SECONDS = 300` makes a keypress break a tick lock a live daemon may still legitimately hold, defeating the lock the ADR says protects the switch.",
+      "failure_scenario": "A tick holds the lock for its whole decide-and-act phase, which includes a checkpoint sweep with pushes across every watched worktree; on a slow network that can exceed five minutes. `Store.acquireLock` breaks a lock on age ALONE, without consulting the owner's liveness, so a keypress would take it and run `switchAccount` concurrently with a tick that is itself mid-switch.",
+      "disposition": "accepted, fixed",
+      "fix": "`LOCK_STALE_SECONDS` is `Number.MAX_SAFE_INTEGER`, which leaves the pid-liveness check as the only thing that can break the lock — break it when the owner is gone, wait when it is alive. Two tests: a backdated lock owned by a live pid is NOT stolen, and a lock whose owner pid is gone IS taken so a killed watcher cannot block a key forever."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/manifest.ts",
+      "line": 327,
+      "summary": "`renderManifestMarkdown` reads spend only from `windows`, so a pre-0.3 manifest re-renders as `unknown` on both windows even though it records a measured headroom.",
+      "failure_scenario": "A 0.2.0 manifest has `{headroomPct: 4, bindingWindow: '5h'}` and no `windows`. `cell('5h')` finds no entry and prints 'unknown', so `rotorcc resume` re-rendering that rescue document throws away a measurement that is in the file. The builder's own test enshrined it.",
+      "disposition": "accepted, fixed",
+      "fix": "`cell` falls back to `usedPct`/`headroomPct` when the requested window IS the recorded binding window and no per-window list exists. The old manifest now renders `| 96% | unknown |` — its 5h measurement kept, its unrecorded week not invented. The test that enshrined the wrong behaviour was replaced with one asserting the fallback."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/actions.ts",
+      "line": 189,
+      "summary": "The checkpoint action reports success when trees were skipped, and the pane truncates the outcome to four lines with no way to see the rest.",
+      "failure_scenario": "`w` → `c` → `y` over ten worktrees where two are skipped because rotorcc cannot save them on its own. `ok` is true (skips are not errors), the pane shows the first four lines plus '… 8 more', and no key could open the full output. The operator rotates believing everything was saved.",
+      "disposition": "accepted, fixed",
+      "fix": "The outcome now LEADS with a summary — `N checkpointed · N pushed · N SKIPPED · N failed`, with a trailing clause when anything was skipped — so the fact survives the four-line preview. A new `o` key opens the last action's full output, documented in the footer and in `?`. `ok` still turns on errors only: a protected branch is a legitimate refusal, not a failure."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/render.ts",
+      "line": 320,
+      "summary": "The confirmation panel is appended after the accounts block and then trimmed to the terminal height by app.ts, so the question and its answer line can be cut off entirely — the code comment claims this cannot happen.",
+      "failure_scenario": "Eight accounts on a 24-row terminal, plus a LAST ACTION block: the panel's prompt and its `y / cancel` line fall past `height - 2` and are never drawn. The operator answers a confirmation whose text is not on screen.",
+      "disposition": "accepted, fixed",
+      "fix": "When a panel is open and `height` is known, the ACCOUNTS block above it is trimmed to make room rather than the panel being pushed off, with a `… N more line(s) above the panel` marker so the list does not just stop. The panel already carries the numbers the question turns on. Test: eight accounts, an eleven-line prompt, height 24 — the title, the last prompt line and the answer line are all inside the visible slice."
+    },
+    {
+      "severity": "P2",
+      "file": "node_modules",
+      "line": 1,
+      "summary": "A `node_modules` symlink pointing at an absolute path outside the checkout is committed to the repository.",
+      "failure_scenario": "Anyone cloning gets a dangling symlink where `node_modules` should be; `npm ci` refuses to write through it or installs outside the checkout, and module resolution fails. On a machine where that absolute path exists, the build silently resolves against another project's dependency tree.",
+      "disposition": "accepted, fixed",
+      "fix": "Removed from the index. `.gitignore` had `node_modules/`, which matches a directory and NOT a symlink of that name; it now carries both forms with the reason written down. The link itself stays on disk, untracked, because this build runs from a git worktree that shares the parent checkout's dependencies."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/model.ts",
+      "line": 127,
+      "summary": "`journal.recent(60)` with `.slice(0, 8)` and `.find()` both assume newest-first ordering, an invariant the previous `journal.recent(8)` call did not depend on.",
+      "failure_scenario": "If `recent(n)` returned oldest-first, the panel headed RECENT DECISIONS would show the eight oldest of the last sixty, and `lastRefusal` would be the oldest refusal rather than the latest.",
+      "disposition": "REFUTED",
+      "refutation": "The ordering is the documented contract of `recent`, not an assumption. `src/core/history.ts:103` — `/** The most recent \\`count\\` decisions, newest first. */` — and the implementation is `entries.slice(-count).reverse()`. It is directly tested at `test/tui.test.ts:120`, 'returns the most recent first', which asserts `recent(2)` yields `['second', 'first']`. That test predates this change and would fail if the ordering flipped, so the invariant `.slice(0, 8)` and `.find()` rely on is pinned. No change made."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/app.ts",
+      "line": 252,
+      "summary": "`void perform(...)` has no rejection handler and `runAction`'s lock acquisition and release sit outside its try/catch, so a throw there latches `busy` forever instead of being reported.",
+      "failure_scenario": "`acquireLock` (before the `try`) or `releaseLock` (in the `finally`) throws on a filesystem error — read-only or full state dir, EACCES. The rejection escapes `runAction` despite its docstring, `perform` never reaches `applyOutcome`, `busy` stays set, and every subsequent acting key is refused with 'an action is still running' for the rest of the session with nothing drawn to say why.",
+      "disposition": "accepted, fixed",
+      "fix": "Both moved inside the guard: `acquireLock` runs inside the `try`, and the `finally` releases only a lock it actually took, itself guarded. `perform` is called with a `.catch` that turns any surviving rejection into a failed outcome on screen, which clears `busy` and draws the reason."
+    },
+    {
+      "severity": "P3",
+      "file": "test/used-not-remaining.test.ts",
+      "line": 107,
+      "summary": "The status assertion was split into two independent `toContain` checks, so it no longer verifies that the percentage and its window appear together — the property the test is named for.",
+      "failure_scenario": "The test passes as long as '80% used' appears anywhere and '5h' appears anywhere. A regression that printed the window names in one block and the figures in another would keep it green while restoring the exact defect.",
+      "disposition": "accepted, fixed",
+      "fix": "The assertion now finds the line carrying the figure and matches `/5h\\s.*80% used/` on that one line, so the window and its number have to co-occur."
+    }
+  ],
+  "blocking": true,
+  "disposition": "9 findings. 8 accepted and fixed with regression tests; 1 P3 refuted with a citation to the documented contract and the pre-existing test that pins it. The P1 and every P2 are closed. A second blind round was run against the fixed diff; its artifact sits beside this one, named tui-interactive-critic-round2.json."
+}

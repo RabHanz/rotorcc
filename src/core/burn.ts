@@ -289,6 +289,14 @@ export function predictThreshold(
   rate: BurnRate,
   targetPct: number,
   nowMs = Date.now(),
+  /**
+   * The window this projection is about.
+   *
+   * Carried purely so the sentences below can name it. A projection is a claim
+   * about one window, and "reaches 5% in two hours" is a different statement
+   * depending on whether the window refills this afternoon or on Sunday.
+   */
+  window = 'the binding window',
 ): Prediction {
   if (rate.pctPerHour === null) {
     return { at: null, inMs: null, confidence: 'none', detail: rate.basis };
@@ -298,7 +306,7 @@ export function predictThreshold(
       at: new Date(nowMs).toISOString(),
       inMs: 0,
       confidence: rate.confidence,
-      detail: `already at or below ${targetPct}% headroom`,
+      detail: `${window} is already at or below ${targetPct}% headroom`,
     };
   }
   if (rate.pctPerHour <= 0) {
@@ -306,7 +314,7 @@ export function predictThreshold(
       at: null,
       inMs: null,
       confidence: rate.confidence,
-      detail: 'headroom is not falling at the moment, so there is nothing to project',
+      detail: `${window} is not falling at the moment, so there is nothing to project`,
     };
   }
   const hours = (currentHeadroomPct - targetPct) / rate.pctPerHour;
@@ -316,7 +324,8 @@ export function predictThreshold(
     inMs,
     confidence: rate.confidence,
     detail:
-      `at ${rate.pctPerHour.toFixed(1)} points/hour, ${formatDuration(inMs)} to ${targetPct}% ` +
+      `at ${rate.pctPerHour.toFixed(1)} points/hour, ${formatDuration(inMs)} to ` +
+      `${targetPct}% headroom on ${window} ` +
       `(${rate.confidence} confidence: ${rate.basis})`,
   };
 }
@@ -333,6 +342,7 @@ export function willFinishFirst(
   prediction: Prediction,
   neededPct: number | null,
   currentHeadroomPct: number,
+  window = 'the binding window',
 ): { answer: boolean | null; detail: string } {
   if (neededPct === null) {
     return {
@@ -344,11 +354,16 @@ export function willFinishFirst(
     return { answer: null, detail: `cannot say: ${prediction.detail}` };
   }
   const answer = currentHeadroomPct >= neededPct;
+  // Headroom, said as headroom and with its window named. This one figure is
+  // deliberately not inverted: it is being compared against an ESTIMATE of what
+  // the work needs, which is also expressed as headroom, and flipping one side
+  // of a comparison is how a screen stops meaning anything.
+  const have = `${currentHeadroomPct.toFixed(0)}% headroom on ${window}`;
   return {
     answer,
     detail: answer
-      ? `${currentHeadroomPct.toFixed(0)}% left vs an estimated ${neededPct.toFixed(0)}% needed`
-      : `${currentHeadroomPct.toFixed(0)}% left is under the estimated ${neededPct.toFixed(0)}% needed`,
+      ? `${have} vs an estimated ${neededPct.toFixed(0)}% needed`
+      : `${have} is under the estimated ${neededPct.toFixed(0)}% needed`,
   };
 }
 

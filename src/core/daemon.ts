@@ -47,9 +47,12 @@ import { findWindowForCwd, launchSuccessor, retireWindow } from './successor.js'
 import { checkLiveness, detectLimitSignature, readTail, unescapeJsonish } from './transcripts.js';
 import {
   type UsageReading,
+  accountHeadline,
   activeAccount,
+  formatWindowsUsed,
   headroomIsKnown,
   readingFromListOutput,
+  usedPctOf,
 } from './usage.js';
 import { selectTarget } from '../accounts/select.js';
 
@@ -259,13 +262,21 @@ async function runActions(
 ): Promise<string[]> {
   const taken = effects.taken;
   const { config, store, logger } = ctx;
+  const activeReading = activeAccount(usage);
+  // Both windows go into every line about the active account. A log that says
+  // "1%" without saying which window it belongs to cannot be read afterwards:
+  // 1% of a five-hour window is forty minutes of waiting and 1% of a week is a
+  // different conversation entirely.
+  const windows = activeReading === null ? 'no active account' : formatWindowsUsed(activeReading);
+  const headline = activeReading === null ? 'no active account' : accountHeadline(activeReading);
 
   for (const action of decision.actions) {
     switch (action.kind) {
       case 'log-warning':
         logger.warn('account headroom is getting low', {
-          headroomPct: decision.headroomPct,
-          window: decision.bindingWindow,
+          usedPct: activeReading === null ? null : usedPctOf(activeReading),
+          bindingWindow: decision.bindingWindow,
+          windows,
         });
         taken.push('log-warning');
         break;
@@ -322,10 +333,9 @@ async function runActions(
           raisedAt: new Date().toISOString(),
           level: 'soft',
           reason:
-            `Account headroom is down to ${decision.headroomPct.toFixed(0)}% on the ` +
-            `${decision.bindingWindow} window. rotorcc has already committed and pushed every ` +
-            'lane it is allowed to touch. Have every running agent commit, push and write its ' +
-            'resume note now; do not start anything new that cannot finish in a few minutes.',
+            `The active account has spent ${headline}. rotorcc has already committed and pushed ` +
+            'every lane it is allowed to touch. Have every running agent commit, push and write ' +
+            'its resume note now; do not start anything new that cannot finish in a few minutes.',
           headroomPct: decision.headroomPct,
         });
         effects.checkpointed = true;
@@ -444,12 +454,15 @@ async function rotate(
     logger.info('dry run: would raise ROTATE_NOW', { target: action.targetAccount });
     taken.push('dry-run-flag-suppressed');
   } else {
+    const target = usage.accounts.find((a) => a.number === action.targetAccount);
     store.raiseFlag(FLAG_ROTATE_NOW, {
       raisedAt: new Date().toISOString(),
       level: 'rotate',
       reason:
-        `Account ${active?.number ?? '?'} is down to ${decision.headroomPct.toFixed(0)}% on the ` +
-        `${decision.bindingWindow} window. rotorcc is rotating to account ${action.targetAccount}. ` +
+        `Account ${active?.number ?? '?'} has spent ` +
+        `${active === null ? 'an unmeasured amount' : accountHeadline(active)}. ` +
+        `rotorcc is rotating to account ${action.targetAccount}` +
+        `${target === undefined ? '' : ` (${formatWindowsUsed(target)})`}. ` +
         'Finish the tool call you are in, order every agent to commit, push and write its resume ' +
         'note, then stop dispatching new work and exit. A replacement session is starting with the ' +
         'manifest below.',
@@ -557,6 +570,9 @@ async function performSwitch(
       roster: manager.roster,
       credentials: manager.credentials,
       target: resolved.slot,
+      // As in `switchCommand`: the locks must resolve against the same Claude
+      // home the credentials do, or they guard nothing.
+      env: manager.credentials.env,
     });
     for (const warning of result.warnings) logger.warn(`switch: ${warning}`);
     return { ok: result.ok, detail: result.detail };

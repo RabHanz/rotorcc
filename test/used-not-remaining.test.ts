@@ -105,18 +105,26 @@ describe('formatUsed', () => {
 describe('rotorcc status', () => {
   it('reports used, with the window, and a bar that fills as it is spent', () => {
     const text = renderStatus(report([measured(1, 20)]), testConfig());
-    expect(text).toContain('80% used (5h)');
+    // On ONE line, together. Two independent `toContain` checks would pass with
+    // the figure in one column block and the window name in another, which is
+    // the exact defect — a percentage whose window has to be inferred.
+    const line = text.split('\n').find((l) => l.includes('80% used')) ?? '';
+    expect(line).toMatch(/5h\s.*80% used/);
     expect(text).not.toContain('% left');
     // 80% used is a mostly-full bar.
-    expect(text).toMatch(/#{15,}\.{0,6}/);
+    expect(text).toMatch(/#{7,}\.{0,3}/);
   });
 
   it('draws no bar and no number for an account it could not measure', () => {
     const text = renderStatus(report([unmeasured(2, 'quota read failed: http-429')]), testConfig());
-    expect(text).toContain('unknown (quota read failed: http-429)');
+    expect(text).toContain('quota read failed: http-429');
+    expect(text).toContain('unknown');
     // This line used to print the placeholder zero as "0% left" — the project's
-    // own cardinal rule, broken on its most-read screen.
+    // own cardinal rule, broken on its most-read screen. Under the used
+    // convention the same fallback would read as "0% used", i.e. completely
+    // fresh, so neither number may appear.
     expect(text).not.toContain('0% left');
+    expect(text).not.toContain('0% used');
     expect(text).not.toContain('100% used');
     expect(text).not.toContain('#####');
   });

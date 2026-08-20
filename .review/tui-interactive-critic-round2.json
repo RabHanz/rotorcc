@@ -1,0 +1,85 @@
+{
+  "status": "reviewed",
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "round": 2,
+  "base": "work/close-cswap-gaps",
+  "head": "work/tui-interactive",
+  "note": "Second blind round, run against the diff as it stood after round 1's fixes, with the review artifact itself excluded from what the critic saw. Fresh headless process, given the diff and the review contract and nothing else — no commit messages, no PR body, no round-1 findings, no statement of who wrote it. Codex was NOT run; its subscription is out.",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/core/manifest.ts",
+      "line": 338,
+      "summary": "The old-manifest fallback in `cell()` re-renders a 0.2.0 placeholder `headroomPct: 0` as a measured `100%` spend in the rescue document.",
+      "failure_scenario": "An existing manifest holds `{headroomPct: 0, bindingWindow: '5h', windows: absent}` for an account that was never read; `cell('5h')` matches the binding window, sees `usedPct === null`, and returns `(100 - 0)` = `100%`.",
+      "disposition": "REFUTED as described; the missing test is accepted and added",
+      "refutation": "The stated input cannot be produced by any rotorcc that has ever written a manifest, and `bindingWindow` is the reason. An account whose headroom is unknown is written with `bindingWindow: 'unknown'` — every such branch in `src/accounts/manager.ts` `readOne` sets it, and the API-key branch sets `'n/a'` — beside the placeholder `headroomPct: 0`. Neither string equals `'5h'` or `'7d'`, so the guard `account.bindingWindow === name` already excludes exactly the case described, and the conversion is never reached. The one path that pairs a real window name with `headroomKnown === false` is the legacy `readingFromListOutput` stale branch, where `headroomPct` is the account's REAL measured binding headroom rather than a placeholder, so rendering it is correct. Accepted: the test suite proved only the measured case. A regression test now asserts that an old-style record with `{headroomPct: 0, bindingWindow: 'unknown'}`, and an API-key one with `'n/a'`, both render `| unknown | unknown |` and that `100%` appears nowhere. The guard's reasoning is now written into the code rather than left implicit."
+    },
+    {
+      "severity": "P1",
+      "file": "src/tui/model.ts",
+      "line": 127,
+      "summary": "`journal.recent(60)` + `.slice(0, 8)` and `.find(...)` both assume the journal returns newest-first; if it returns chronological order the decisions panel shows hour-old entries and `lastRefusal` picks the oldest refusal.",
+      "failure_scenario": "If `recent(n)` is ascending, `recent(60).slice(0, 8)` shows the decisions from ~52-60 minutes ago and `find(refused)` returns the oldest refusal in the hour.",
+      "disposition": "REFUTED",
+      "refutation": "Newest-first is the documented and tested contract, not an assumption. `src/core/history.ts:103` reads `/** The most recent \\`count\\` decisions, newest first. */` and the implementation is `entries.slice(-count).reverse()`. `test/tui.test.ts:120`, 'returns the most recent first', asserts `recent(2)` yields `['second', 'first']`; that test predates this change and fails if the ordering flips. The critic's supporting evidence points the other way on inspection: in README's sample frame the header stamp is 20:20:47 and the RECENT DECISIONS block lists 20:19, then 20:18, then 20:17 — newest FIRST, oldest last, which is descending. Raised independently in round 1 and refuted on the same citations. No change made."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/app.ts",
+      "line": 222,
+      "summary": "A dry-run strategy change mutates the in-memory config, so the dashboard reports a strategy that is not in force and computes the `w` panel's selection with it.",
+      "failure_scenario": "`rotorcc tui --dry-run`, `t`, pick `consume-first`, enter: the outcome says nothing was written, but the ACCOUNTS footer prints `strategy consume-first`, the picker marks it `(in force)`, and the next gather passes the mutated config to `selectTarget`, so the panel that exists to explain what the machine will do answers with a rule the watcher will never use.",
+      "disposition": "accepted, fixed",
+      "fix": "The in-memory adoption is now guarded by `!options.dryRun`. A dry run reports success because it successfully did nothing; adopting the value anyway is the same class of defect as a dry run raising a live flag, which this project has shipped once already."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/render.ts",
+      "line": 335,
+      "summary": "The short-terminal trim does not guarantee the panel fits, so a confirmation's answer line is cut off the bottom when the panel alone exceeds the window.",
+      "failure_scenario": "`keep` floors at 2, so a panel taller than `room - 3` produces a frame longer than the window and `app.ts` cuts the panel's BOTTOM — the blank, the `y / enter do it   any other key cancel` line, and the bottom border. The operator sees a question with no visible answer key and no sign that anything was cut.",
+      "disposition": "accepted, fixed",
+      "fix": "`panel()` takes a hard line ceiling and, over it, drops its own MIDDLE with a `… N more line(s) not shown` marker, always keeping the title and the last body line — which is always the line naming the keys. `renderDashboard` computes that ceiling from the terminal height before building the panel. Test: a 40-line prompt on an 18-row terminal still shows the title, the word `cancel`, and the marker saying what was dropped."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/render.ts",
+      "line": 353,
+      "summary": "Every boxed panel line is two columns wider than the terminal for any width under 98, so the right border is truncated away on a standard 80-column terminal.",
+      "failure_scenario": "`inner = Math.max(20, Math.min(width, 96) - 4)` but an emitted line is `inner + 6` columns. At width 80 the line is 82 and the frame's width guard cuts the trailing ` │` off every row, so every box renders with no right wall on the common 80-column SSH default.",
+      "disposition": "accepted, fixed",
+      "fix": "`inner` is `Math.min(width, 96) - 6`, which is the real overhead, with the arithmetic written down beside it. Test: at widths 48, 60, 80, 100 and 200 no rendered line exceeds the width AND at least one line still ends in the right wall, so the fix cannot be satisfied by dropping the border."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/render.ts",
+      "line": 503,
+      "summary": "The `w` panel silently truncates the very reason strings it exists to display, and this diff made those strings substantially longer.",
+      "failure_scenario": "The selection reason is emitted as one unwrapped line sliced at 200 characters and then cut again to the panel width; rejection reasons are unwrapped; `wrap()` slices to six lines with no marker. Since this change prefixes both windows to every one of those reasons, they now routinely run past the panel and are cut mid-sentence.",
+      "disposition": "accepted, fixed",
+      "fix": "The selection reason and every rejection reason are wrapped to the panel's own inner width rather than a fixed column, and `wrap()` appends `… N more line(s)` instead of slicing silently. A partial explanation presented as a whole one is the same defect as a partial measurement presented as a whole one."
+    },
+    {
+      "severity": "P3",
+      "file": "test/both-windows.test.ts",
+      "line": 430,
+      "summary": "The test named for the read-only frame never exercises the code that decides a frame is read-only.",
+      "failure_scenario": "It calls `renderDashboard` with no `ui`, so the assertion is satisfied by the call site rather than by any production decision. If `renderOnce` were changed to pass ui through, a cron mail would render a cursor and an open panel and the test would still pass.",
+      "disposition": "accepted, fixed",
+      "fix": "A new test drives `runTui` itself with a non-TTY stdout and a stdin that records `setRawMode` calls, and asserts: one frame, no cursor, no panel border, no alternate-screen escape, and raw mode never taken. A second does the same for `--once` on a stdout that IS a terminal. Both exercise the branch in `runTui` that makes the decision."
+    },
+    {
+      "severity": "P3",
+      "file": "src/tui/app.ts",
+      "line": 198,
+      "summary": "`perform()`'s post-action refresh is dropped when a periodic gather is already in flight, leaving the pane reporting a successful switch beside an account table that still marks the old account active.",
+      "failure_scenario": "`gather` returns immediately when `gathering` is true and `perform` does not retry, so a periodic gather that started a few hundred milliseconds before the switch finished overwrites `model` with a reading taken before the credential moved. An operator reading the table rather than the outcome line can confirm a second, redundant switch.",
+      "disposition": "accepted, fixed",
+      "fix": "Requests coalesce instead of being dropped: `coalescingRunner` runs exactly one more pass after the in-flight one, with the requests merged so a `force` never degrades to a plain refresh. Both are exported and unit-tested — three requests arriving mid-flight collapse into one follow-up carrying `force: true`, and a run with nothing queued does not repeat."
+    }
+  ],
+  "blocking": true,
+  "disposition": "8 findings. 6 accepted and fixed with regression tests; 2 P1s refuted with citations — one of them a repeat of a round-1 finding, refuted on the same evidence, plus a correction of the reading of README the critic offered in support of it. One P1 refutation carried an accepted test gap, which is now closed. A third blind round was run against the fixed diff."
+}

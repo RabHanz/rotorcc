@@ -17,6 +17,7 @@ import type { Config } from '../config/schema.js';
 import type { AccountManager } from '../accounts/manager.js';
 import {
   type BurnRate,
+  type Prediction,
   BurnStore,
   burnRateFrom,
   formatDuration,
@@ -24,7 +25,7 @@ import {
   willFinishFirst,
 } from '../core/burn.js';
 import type { Store } from '../core/state.js';
-import { headroomIsKnown } from '../core/usage.js';
+import { headroomIsKnown, usedPctOf, windowLines, windowsUsedOf } from '../core/usage.js';
 import { collectWorkload, estimateHeadroomNeeded } from '../core/workload.js';
 
 export interface PredictOptions {
@@ -55,7 +56,28 @@ export async function runPredict(options: PredictOptions): Promise<number> {
 
   const rows = reading.accounts.map((account) => {
     const rate = burnRateFrom(burn.series(account.number));
-    const prediction = predictThreshold(account.headroomPct, rate, config.thresholds.rotatePct);
+    // An account rotorcc could not measure gets NO projection, however much
+    // burn history it has from before. `headroomPct` is a placeholder zero for
+    // such an account, and feeding it in produces the most confident possible
+    // output — `already at or below 5% headroom`, `inMs: 0` — about the one
+    // account rotorcc has just admitted it cannot read. The text surface
+    // skipped those rows; `--json` did not, and a cron job branching on it
+    // would have read a fabricated deadline.
+    const measured = headroomIsKnown(account);
+    const prediction: Prediction = measured
+      ? predictThreshold(
+          account.headroomPct,
+          rate,
+          config.thresholds.rotatePct,
+          Date.now(),
+          account.bindingWindow,
+        )
+      : {
+          at: null,
+          inMs: null,
+          confidence: 'none',
+          detail: `headroom is unknown — ${account.unknownReason ?? 'not measured'}`,
+        };
     const requirement =
       workload === null
         ? {
@@ -66,7 +88,17 @@ export async function runPredict(options: PredictOptions): Promise<number> {
         : estimateHeadroomNeeded(workload, rate.pctPerHour, {
             minimumPct: config.minTargetHeadroomPct,
           });
-    const finish = willFinishFirst(prediction, requirement.estimatedPct, account.headroomPct);
+    const finish = measured
+      ? willFinishFirst(
+          prediction,
+          requirement.estimatedPct,
+          account.headroomPct,
+          account.bindingWindow,
+        )
+      : {
+          answer: null,
+          detail: `cannot say: headroom is unknown — ${account.unknownReason ?? 'not measured'}`,
+        };
     return { account, rate, prediction, requirement, finish };
   });
 
@@ -79,9 +111,12 @@ export async function runPredict(options: PredictOptions): Promise<number> {
           accounts: rows.map((r) => ({
             slot: r.account.number,
             active: r.account.active,
+            usedPct: usedPctOf(r.account),
             headroomPct: headroomIsKnown(r.account) ? r.account.headroomPct : null,
             headroomKnown: headroomIsKnown(r.account),
             bindingWindow: headroomIsKnown(r.account) ? r.account.bindingWindow : null,
+            // Always carries 5h and 7d, each null when unmeasured.
+            windows: windowsUsedOf(r.account),
             burnPctPerHour: r.rate.pctPerHour,
             burnConfidence: r.rate.confidence,
             burnSamples: r.rate.samples,
@@ -115,18 +150,19 @@ export async function runPredict(options: PredictOptions): Promise<number> {
     const label = row.account.alias ?? row.account.email ?? `account ${row.account.number}`;
     out(`${row.account.active ? '>' : ' '} ${label} (slot ${row.account.number})`);
 
+    // Both windows, always. The projection below is about the window that
+    // binds, and reading that number without the other one beside it is how
+    // "this account is nearly gone" got said about an account whose week was
+    // perfectly healthy.
+    out('    spent');
+    for (const line of windowLines(row.account, '      ')) out(line);
+
     if (!headroomIsKnown(row.account)) {
-      out(`    headroom      unknown — ${row.account.unknownReason ?? 'not measured'}`);
+      out(`    binding       unknown — ${row.account.unknownReason ?? 'not measured'}`);
       out('');
       continue;
     }
 
-    out(
-      `    headroom      ${row.account.headroomPct.toFixed(0)}% on ${row.account.bindingWindow}` +
-        (row.account.bindingResetsAt === undefined
-          ? ''
-          : `, resets ${row.account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`),
-    );
     out(`    burn rate     ${describeRate(row.rate)}`);
     out(
       `    hits ${String(config.thresholds.rotatePct).padStart(2)}%      ${

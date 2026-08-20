@@ -13,8 +13,9 @@ import { existsSync } from 'node:fs';
 
 import type { Config } from '../config/schema.js';
 import { AccountManager } from '../accounts/manager.js';
+import { type Selection, selectTarget } from '../accounts/select.js';
 import { BurnStore, burnRateFrom, predictThreshold, willFinishFirst } from '../core/burn.js';
-import { DecisionJournal } from '../core/history.js';
+import { type DecisionEntry, DecisionJournal } from '../core/history.js';
 import { run } from '../core/proc.js';
 import {
   FLAG_ALL_EXHAUSTED,
@@ -96,6 +97,7 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
         rate,
         config.thresholds.rotatePct,
         nowDate.getTime(),
+        account.bindingWindow,
       );
       const needed =
         workload === null
@@ -107,7 +109,12 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
         accountNumber: account.number,
         rate,
         prediction,
-        finishesFirst: willFinishFirst(prediction, needed.estimatedPct, account.headroomPct),
+        finishesFirst: willFinishFirst(
+          prediction,
+          needed.estimatedPct,
+          account.headroomPct,
+          account.bindingWindow,
+        ),
       });
     }
   }
@@ -117,6 +124,29 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
   const watcher = await watcherHealth(config);
 
   const journal = new DecisionJournal(store.dir);
+  const recent = journal.recent(60);
+
+  // The selector, run over the same reading with the same options the watcher
+  // uses. This is what makes the "why has nothing happened?" panel an answer
+  // rather than a guess: the rejection reasons on screen are the ones the
+  // decision itself produced, not prose written to sound like them.
+  const selection: Selection | null =
+    usage === null
+      ? null
+      : selectTarget(usage, {
+          strategy: config.strategy,
+          activeNumber: usage.activeAccountNumber,
+          minHeadroomPct: config.minTargetHeadroomPct,
+          models: config.models,
+          now: () => nowDate,
+        });
+
+  const raisedFlags: DashboardModel['raisedFlags'] = [];
+  for (const name of [FLAG_ROTATE_NOW, FLAG_SOFT_CHECKPOINT, FLAG_ALL_EXHAUSTED]) {
+    const payload = store.readFlag(name);
+    if (payload === null) continue;
+    raisedFlags.push({ name, reason: payload.reason, raisedAt: payload.raisedAt });
+  }
 
   return {
     now: nowDate,
@@ -135,8 +165,19 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
     },
     lastSnapshotAt: state.lastSnapshotAt,
     watcher,
-    decisions: journal.recent(8),
+    decisions: recent.slice(0, 8),
     consecutiveIdle: journal.consecutiveIdle(),
+    strategy: config.strategy,
+    selection,
+    // The most recent decision that did NOT act. A screen full of "idle" is
+    // exactly what an operator should not have to read through to find the
+    // moment rotorcc decided against doing the thing they expected.
+    lastRefusal:
+      recent.find(
+        (entry: DecisionEntry) =>
+          entry.kind === 'refused' || entry.kind === 'blocked' || entry.kind === 'error',
+      ) ?? null,
+    raisedFlags,
     flags: {
       soft: store.readFlag(FLAG_SOFT_CHECKPOINT) !== null,
       rotate: store.readFlag(FLAG_ROTATE_NOW) !== null,

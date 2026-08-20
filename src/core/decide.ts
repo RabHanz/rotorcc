@@ -24,7 +24,12 @@
  */
 import type { Config } from '../config/schema.js';
 import { selectTarget } from '../accounts/select.js';
-import { type AccountReading, type UsageReading, activeAccount } from './usage.js';
+import {
+  type AccountReading,
+  type UsageReading,
+  activeAccount,
+  formatWindowsUsed,
+} from './usage.js';
 
 export type Level = 'ok' | 'warn' | 'soft' | 'rotate';
 
@@ -220,7 +225,7 @@ export function decide(reading: UsageReading, config: Config, state: RotorState)
   if (level === 'warn' || level === 'soft' || level === 'rotate') {
     if (arm('warn')) {
       actions.push({ kind: 'log-warning' });
-      reasons.push(`headroom ${active.headroomPct.toFixed(1)}% on ${active.bindingWindow}`);
+      reasons.push(`${formatWindowsUsed(active)}; ${active.bindingWindow} binds`);
     }
   }
 
@@ -263,9 +268,7 @@ export function decide(reading: UsageReading, config: Config, state: RotorState)
         reasons.push('no viable target; refusing to thrash');
       } else {
         actions.push({ kind: 'rotate', targetAccount: target.number });
-        reasons.push(
-          `rotating to account ${target.number} (${Math.round(target.headroomPct)}% headroom)`,
-        );
+        reasons.push(`rotating to account ${target.number} (${formatWindowsUsed(target)})`);
       }
     }
     // A rotation checkpoints on its way out. A rotation that was refused does
@@ -278,7 +281,7 @@ export function decide(reading: UsageReading, config: Config, state: RotorState)
   const reason =
     reasons.length > 0
       ? reasons.join('; ')
-      : `headroom ${active.headroomPct.toFixed(1)}% on ${active.bindingWindow}; nothing to do`;
+      : `${formatWindowsUsed(active)}; ${active.bindingWindow} binds; nothing to do`;
 
   const nextState: RotorState = {
     ...state,

@@ -18,7 +18,13 @@ import {
 } from '../core/state.js';
 import { PendingSwitchStore } from '../core/nextSession.js';
 import { allSessions } from '../core/transcripts.js';
-import { type UsageReading, activeAccount, formatUsed, usedPctOf } from '../core/usage.js';
+import {
+  type UsageReading,
+  accountJson,
+  activeAccount,
+  formatBinding,
+  windowLines,
+} from '../core/usage.js';
 import { discoverTrees } from '../core/worktrees.js';
 
 export interface StatusReport {
@@ -167,17 +173,6 @@ export async function buildStatus(
   };
 }
 
-/**
- * A bar showing how much is SPENT, filling left to right as the window is used.
- *
- * There is deliberately no bar at all for an unmeasured account: an empty bar
- * and a genuine 0% look identical, and only one of them is a measurement.
- */
-function bar(usedPct: number, width = 20): string {
-  const filled = Math.max(0, Math.min(width, Math.round((usedPct / 100) * width)));
-  return `${'#'.repeat(filled)}${'.'.repeat(width - filled)}`;
-}
-
 export function renderStatus(report: StatusReport, config: Config): string {
   const lines: string[] = [];
   const push = (s = '') => lines.push(s);
@@ -188,24 +183,26 @@ export function renderStatus(report: StatusReport, config: Config): string {
   if (report.usage === null) {
     push(`  accounts     unreadable — ${report.usageError ?? 'unknown error'}`);
   } else {
+    if (report.usage.accounts.length > 0) {
+      push('  accounts     how much of each window has been SPENT');
+      push('');
+    }
     for (const account of report.usage.accounts) {
       const label = account.alias ?? account.email ?? `account ${account.number}`;
       const marker = account.active ? '>' : ' ';
-      const head = `  ${marker} ${String(account.number).padEnd(2)} ${label.padEnd(28)}`;
-      const used = usedPctOf(account);
-      if (used === null) {
-        // No bar and no number. This line used to render the placeholder zero
-        // as "0% left", which is the project's own cardinal rule broken on its
-        // most-read screen: an account rotorcc could not measure was displayed
-        // as an account with nothing left.
-        push(`${head} ${' '.repeat(20)} ${formatUsed(account)}`);
-        continue;
-      }
-      const resets =
-        account.bindingResetsAt === undefined
-          ? ''
-          : ` · resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`;
-      push(`${head} ${bar(used)} ${formatUsed(account)}${resets}`);
+      const tags =
+        (account.disabled === true ? ' [disabled]' : '') +
+        (account.kind === 'api-key' ? ' [api-key]' : '');
+      // BOTH windows, always, each labelled and each reported as used. Showing
+      // only the binding one is what made a 5-hour window at 99% and a week at
+      // 72% look like the same account, and only one of those situations is a
+      // reason to stop. Which one binds is still said — on the row below, and
+      // again beside the window it names.
+      push(
+        `  ${marker} ${String(account.number).padEnd(2)} ${label.slice(0, 30).padEnd(30)} ` +
+          `${formatBinding(account)}${tags}`,
+      );
+      for (const line of windowLines(account)) push(line);
     }
     push('');
     push(
@@ -269,6 +266,33 @@ export function renderStatus(report: StatusReport, config: Config): string {
 
   push('');
   return lines.join('\n');
+}
+
+/**
+ * `status --json`, shaped deliberately rather than dumped.
+ *
+ * The report's internal `AccountReading` carries a PLACEHOLDER zero in
+ * `headroomPct` for an account rotorcc could not measure — safe inside the
+ * decision code, which always asks `headroomIsKnown` first, and a lie the
+ * moment it is serialised for somebody else to read. Every account goes through
+ * `accountJson`, which nulls what was never measured and always carries both
+ * headline windows.
+ */
+export function statusJson(report: StatusReport): Record<string, unknown> {
+  return {
+    ...report,
+    usage:
+      report.usage === null
+        ? null
+        : {
+            observedAt: report.usage.observedAt,
+            activeAccountNumber: report.usage.activeAccountNumber,
+            source: report.usage.source,
+            activeDetectionReason: report.usage.activeDetectionReason ?? null,
+            unreadableAccounts: report.usage.unreadableAccounts ?? [],
+            accounts: report.usage.accounts.map(accountJson),
+          },
+  };
 }
 
 export function storeSize(path: string): number {

@@ -41,7 +41,7 @@ import { findUnclaimed, purgeUnclaimed } from '../accounts/unclaimed.js';
 import { claudeCredentialsPath, claudeGlobalConfigPath } from '../core/paths.js';
 import { selectTarget, type Strategy } from '../accounts/select.js';
 import { switchAccount } from '../accounts/switch.js';
-import { formatUsed, headroomIsKnown, usedPctOf } from '../core/usage.js';
+import { accountJson, formatBinding, windowLines } from '../core/usage.js';
 import { formatAge } from '../accounts/manager.js';
 
 export interface AccountsContext {
@@ -64,39 +64,15 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
           activeAccount: reading.activeAccountNumber,
           activeDetection: reading.activeDetectionReason ?? null,
           observedAt: reading.observedAt,
+          // `accountJson` is the one shape every --json surface emits. It nulls
+          // what was never measured — never 0, never 100 — and its `windows`
+          // array ALWAYS carries `5h` and `7d`, so a consumer never has to
+          // guess whether a missing window meant "empty" or "not reported".
           accounts: reading.accounts.map((a) => ({
-            slot: a.number,
-            email: a.email ?? null,
-            alias: a.alias ?? null,
-            active: a.active,
-            disabled: a.disabled ?? false,
-            kind: a.kind ?? 'oauth',
-            // Both figures, both named, neither inverted in place.
-            //
-            // `usedPct` is the convention every human surface now uses, and the
-            // one Anthropic's API and Claude Code's status line report in.
-            // `headroomPct` stays, unchanged in meaning, because silently
-            // inverting a field while keeping its name would make an existing
-            // consumer read 99 as "healthy" when it means "nearly gone" — a
-            // worse outcome than either convention on its own.
-            //
-            // null, never 0. A consumer that sees 0 will treat it as exhausted.
-            usedPct: usedPctOf(a),
-            headroomPct: headroomIsKnown(a) ? a.headroomPct : null,
-            headroomKnown: headroomIsKnown(a),
-            window: headroomIsKnown(a) ? a.bindingWindow : null,
-            unknownReason: headroomIsKnown(a) ? null : (a.unknownReason ?? 'not measured'),
-            bindingWindow: headroomIsKnown(a) ? a.bindingWindow : null,
-            bindingResetsAt: a.bindingResetsAt ?? null,
-            usageAgeSeconds:
-              a.usageAgeMs === null || a.usageAgeMs === undefined
-                ? null
-                : Math.round(a.usageAgeMs / 1000),
-            windows: a.windows.map((w) => ({
-              name: w.name,
-              headroomPct: w.headroomPct,
-              resetsAt: w.resetsAt ?? null,
-            })),
+            ...accountJson(a),
+            // Kept for consumers written against the previous shape: `window`
+            // was the binding window's name and still is.
+            window: accountJson(a).bindingWindow,
           })),
         },
         null,
@@ -116,32 +92,28 @@ export async function listAccounts(ctx: AccountsContext, force = false): Promise
     return 0;
   }
 
+  ctx.out('  how much of each window has been SPENT');
+  ctx.out('');
   for (const account of reading.accounts) {
     const marker = account.active ? '>' : ' ';
     const label = account.alias ?? account.email ?? `account ${account.number}`;
     const tags =
       (account.disabled === true ? ' [disabled]' : '') +
       (account.kind === 'api-key' ? ' [api-key]' : '');
-
-    if (!headroomIsKnown(account)) {
-      ctx.out(
-        `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
-          `${'unknown'.padEnd(22)} ${account.unknownReason ?? 'not measured'}${tags}`,
-      );
-      continue;
-    }
-    const resets =
-      account.bindingResetsAt === undefined
-        ? ''
-        : ` · resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`;
     const age =
       account.usageAgeMs === null || account.usageAgeMs === undefined
         ? ''
         : ` · ${formatAge(account.usageAgeMs)} old`;
+
+    // BOTH windows for every account. Which one binds is said on the row and
+    // again beside the window it names — never instead of the other number,
+    // because a 99%-spent 5-hour window and a spent week look identical when
+    // only one of them is on screen.
     ctx.out(
-      `  ${marker} ${String(account.number).padEnd(3)} ${label.padEnd(30)} ` +
-        `${formatUsed(account).padEnd(20)}${resets}${age}${tags}`,
+      `  ${marker} ${String(account.number).padEnd(3)} ${label.slice(0, 30).padEnd(30)} ` +
+        `${formatBinding(account)}${age}${tags}`,
     );
+    for (const line of windowLines(account)) ctx.out(line);
   }
 
   if (reading.activeAccountNumber === null && reading.activeDetectionReason !== undefined) {
@@ -725,6 +697,11 @@ export async function switchCommand(
     credentials: ctx.manager.credentials,
     target,
     dryRun: ctx.dryRun,
+    // The same environment the credential store reads and writes through.
+    // Left to default, the switch would take Claude Code's advisory locks in
+    // one home while moving credentials in another — which is to say, take no
+    // useful lock at all.
+    env: ctx.manager.credentials.env,
   });
 
   if (ctx.json) {

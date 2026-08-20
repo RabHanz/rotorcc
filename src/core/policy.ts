@@ -37,7 +37,13 @@
  * tested.
  */
 import type { Config } from '../config/schema.js';
-import { type AccountReading, type UsageReading, activeAccount, headroomIsKnown } from './usage.js';
+import {
+  type AccountReading,
+  type UsageReading,
+  activeAccount,
+  formatWindowsUsed,
+  headroomIsKnown,
+} from './usage.js';
 
 /** A window's headroom, or null when the account did not report it. */
 export function windowHeadroom(account: AccountReading, name: string): number | null {
@@ -134,6 +140,13 @@ export interface ExhaustedAccount {
   resetsAt: string | null;
   /** Why it is not a candidate, in words. */
   why: string;
+  /**
+   * Both windows, formatted, so the notice that stops the machine says which
+   * kind of exhausted each account is. "Out for forty minutes" and "out for the
+   * week" produce completely different next moves from the human this notice is
+   * addressed to, and a single figure cannot tell them apart.
+   */
+  windows?: string;
 }
 
 export interface PolicyInput {
@@ -185,6 +198,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: null,
         window: 'unknown',
         resetsAt: null,
+        windows: formatWindowsUsed(account),
         why: account.unknownReason ?? 'not measured',
       });
       continue;
@@ -196,6 +210,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: null,
         window: 'n/a',
         resetsAt: null,
+        windows: formatWindowsUsed(account),
         why: 'API-key account: bills per token, never an automatic target',
       });
       continue;
@@ -207,6 +222,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: weekly.pct,
         window: weekly.window,
         resetsAt: account.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(account),
         why: 'disabled by the operator',
       });
       continue;
@@ -218,6 +234,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: weekly.pct,
         window: weekly.window,
         resetsAt: account.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(account),
         why:
           weekly.pct === null
             ? 'weekly headroom unknown'
@@ -242,18 +259,17 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
       return {
         kind: 'checkpoint',
         reason:
-          `the 5-hour window is down to ${activeView.fiveHourPct.toFixed(0)}% but the weekly ` +
-          `window is healthy at ${activeWeekly.pct?.toFixed(0) ?? '?'}%. Saving everything and ` +
-          "staying put: burning a second account's week to escape a window that refills in " +
-          'hours is a bad trade.',
+          `the active account has spent ${formatWindowsUsed(active)}: the 5-hour window is low ` +
+          'but the weekly window is healthy. Saving everything and staying put — burning a ' +
+          "second account's week to escape a window that refills in hours is a bad trade.",
       };
     }
     if (weeklyWarn) {
       return {
         kind: 'warn',
         reason:
-          `weekly window at ${activeWeekly.pct?.toFixed(0) ?? '?'}% headroom on ` +
-          `${activeWeekly.window}; approaching the ${config.weeklyRotatePct}% handover point`,
+          `the active account has spent ${formatWindowsUsed(active)}; its ${activeWeekly.window} ` +
+          `window is approaching the ${config.weeklyRotatePct}% headroom handover point`,
       };
     }
     if (weeklyUnknown) {
@@ -266,7 +282,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     }
     return {
       kind: 'none',
-      reason: `weekly headroom ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}; nothing to do`,
+      reason: `the active account has spent ${formatWindowsUsed(active)}; nothing to do`,
     };
   }
 
@@ -281,6 +297,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: activeWeekly.pct,
         window: activeWeekly.window,
         resetsAt: active.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(active),
         why: 'the account in use',
       },
       ...rejected,
@@ -299,8 +316,8 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
       return {
         kind: 'checkpoint',
         reason:
-          `the weekly window is down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% and rotorcc could ` +
-          `not measure ${unmeasured.length} of the other account(s) ` +
+          `the active account has spent ${formatWindowsUsed(active)}, its weekly budget is spent, ` +
+          `and rotorcc could not measure ${unmeasured.length} of the other account(s) ` +
           `(${unmeasured.map((u) => `slot ${u.slot}: ${u.why}`).join('; ')}). ` +
           'It will NOT declare the machine out of quota on a reading it does not have, and it ' +
           'will not hand over to an account it cannot see. Everything has been checkpointed; ' +
@@ -323,7 +340,6 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
   const best = candidates.reduce((a, b) =>
     (weeklyHeadroom(b, models).pct ?? 0) > (weeklyHeadroom(a, models).pct ?? 0) ? b : a,
   );
-  const bestWeekly = weeklyHeadroom(best, models);
   const bestLabel = best.alias ?? best.email ?? `slot ${best.number}`;
 
   if (!config.rotation.enabled) {
@@ -336,8 +352,8 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     return {
       kind: 'checkpoint',
       reason:
-        `weekly window down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}, ` +
-        `and ${bestLabel} (slot ${best.number}) has ${bestWeekly.pct?.toFixed(0) ?? '?'}% left — ` +
+        `the active account has spent ${formatWindowsUsed(active)}, and ${bestLabel} ` +
+        `(slot ${best.number}) has spent ${formatWindowsUsed(best)} — ` +
         'but rotation is disabled in this configuration, so nothing was queued. ' +
         'Everything has been checkpointed; switch by hand when you are ready.',
     };
@@ -348,9 +364,10 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     slot: best.number,
     window: activeWeekly.window,
     reason:
-      `weekly window down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}. ` +
-      `The next session will open on ${bestLabel} (slot ${best.number}, ` +
-      `${bestWeekly.pct?.toFixed(0) ?? '?'}% weekly headroom). ` +
+      `the active account has spent ${formatWindowsUsed(active)}, so its ${activeWeekly.window} ` +
+      `budget is at or under the ${config.weeklyRotatePct}% headroom floor. ` +
+      `The next session will open on ${bestLabel} (slot ${best.number}, which has spent ` +
+      `${formatWindowsUsed(best)}). ` +
       (input.sessionAlive
         ? 'The running session is NOT being interrupted — it keeps its account until it ends.'
         : 'No session is running, so this takes effect immediately.'),
@@ -377,17 +394,19 @@ export function renderStopNotice(action: Extract<PolicyAction, { kind: 'stop' }>
   lines.push('  No rotation was performed. No session was started. Nothing is running');
   lines.push('  that will consume more quota.');
   lines.push('');
-  lines.push('  accounts');
+  lines.push('  accounts — how much of each window has been SPENT');
   for (const account of action.accounts) {
-    const headroom =
-      account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}% left`;
     const resets =
       account.resetsAt === null
         ? 'reset time unknown'
         : `resets ${account.resetsAt.slice(0, 16).replace('T', ' ')}`;
+    lines.push(`    ${String(account.slot).padEnd(3)} ${account.label}`);
+    // Both windows, then which one binds. The old form printed one figure as
+    // "N% left", which inverted the convention every other surface uses and
+    // said nothing about the window that was not chosen.
+    lines.push(`        ${account.windows ?? 'window spend not recorded'}`);
     lines.push(
-      `    ${String(account.slot).padEnd(3)} ${account.label.padEnd(26)} ` +
-        `${headroom.padEnd(14)} ${account.window.padEnd(8)} ${resets}`,
+      `        ${account.window === 'unknown' ? 'binding window unknown' : `${account.window} binds`} · ${resets}`,
     );
     lines.push(`        ${account.why}`);
   }

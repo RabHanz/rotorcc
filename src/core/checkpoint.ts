@@ -23,6 +23,7 @@ import { Store, timestampSlug } from './state.js';
 import { type SessionFile, allSessions, projectTranscriptDir } from './transcripts.js';
 import type { BackgroundTask } from './hookPayload.js';
 import type { AccountReading, UsageReading } from './usage.js';
+import { headroomIsKnown, usedPctOf, windowsUsedOf } from './usage.js';
 import {
   type CheckpointOutcome,
   type TreeStatus,
@@ -291,10 +292,21 @@ export async function performCheckpoint(input: CheckpointInput): Promise<Checkpo
       list: (input.usage?.accounts ?? []).map((account) => ({
         number: account.number,
         label: accountLabel(account),
-        headroomPct: account.headroomPct,
-        bindingWindow: account.bindingWindow,
+        // Null, never the placeholder zero. `AccountReading.headroomPct` is a
+        // safe stand-in inside the decision code, which always asks
+        // `headroomIsKnown` first; written into a document somebody reads six
+        // weeks later it is a measurement that never happened.
+        headroomPct: headroomIsKnown(account) ? account.headroomPct : null,
+        usedPct: usedPctOf(account),
+        bindingWindow: headroomIsKnown(account) ? account.bindingWindow : 'unknown',
         resetsAt: account.bindingResetsAt ?? null,
         active: account.active,
+        windows: windowsUsedOf(account).map((window) => ({
+          name: window.name,
+          usedPct: window.usedPct,
+          resetsAt: window.resetsAt,
+          binding: window.binding,
+        })),
       })),
     },
     projects: await Promise.all(

@@ -62,7 +62,7 @@
  * reading falls back to its binding headroom with the reason said out loud.
  */
 import type { AccountReading, UsageReading } from '../core/usage.js';
-import { headroomIsKnown } from '../core/usage.js';
+import { formatWindowsUsed, headroomIsKnown } from '../core/usage.js';
 import { weeklyHeadroom, windowsOf } from '../core/policy.js';
 
 export type Strategy = 'best' | 'next-available' | 'consume-first' | 'work-aware';
@@ -171,14 +171,18 @@ export function capacityOf(
 
   const rankPct = weekly.pct ?? account.headroomPct;
 
-  // Used, not remaining, and with the window named — the same convention every
-  // other surface reports in. A candidate list that says "28% on 7d" beside a
-  // status screen that says "72% used (7d)" makes the reader invert one of
-  // them, which is the mistake the convention exists to remove.
-  const parts: string[] = [];
-  parts.push(`${(100 - account.headroomPct).toFixed(0)}% used on ${account.bindingWindow} now`);
-  if (weekly.pct !== null && account.bindingWindow !== weekly.window) {
-    parts.push(`${(100 - weekly.pct).toFixed(0)}% of its ${weekly.window} budget used`);
+  // BOTH windows, used, each named — the same convention and the same words
+  // every other surface reports in. A candidate list that says "28% on 7d"
+  // beside a status screen that says "72% used (7d)" makes the reader invert
+  // one of them; a candidate list that mentions only the window that binds
+  // makes them guess at the other, which is the mistake that produced the
+  // 2026-08-19 misreport in the first place.
+  const parts: string[] = [formatWindowsUsed(account)];
+  parts.push(
+    headroomIsKnown(account) ? `${account.bindingWindow} binds` : 'binding window unknown',
+  );
+  if (weekly.pct !== null && weekly.window !== '7d') {
+    parts.push(`its weekly budget is gated by the ${weekly.window} cap`);
   }
   if (!fiveHourHasRoom && fiveHour !== null) {
     parts.push(
@@ -258,7 +262,9 @@ export function selectTarget(reading: UsageReading, options: SelectOptions): Sel
     if (account.headroomPct < options.minHeadroomPct) {
       rejected.push({
         account,
-        reason: `${account.headroomPct.toFixed(0)}% headroom is under the ${options.minHeadroomPct}% floor`,
+        reason:
+          `${formatWindowsUsed(account)}; its binding ${account.bindingWindow} window has ` +
+          `${account.headroomPct.toFixed(0)}% headroom, under the ${options.minHeadroomPct}% floor`,
       });
       continue;
     }
@@ -296,7 +302,7 @@ export function selectTarget(reading: UsageReading, options: SelectOptions): Sel
         .sort((a, b) => wrapDistance(from, a.number) - wrapDistance(from, b.number))
         .map((account) => ({
           account,
-          note: `slot ${account.number}, ${account.headroomPct.toFixed(0)}% headroom`,
+          note: `slot ${account.number}, ${formatWindowsUsed(account)}, ${account.bindingWindow} binds`,
         }));
       return finish(ranked, rejected, options.strategy, 'next slot in order, skipping exhausted');
     }
@@ -313,8 +319,8 @@ export function selectTarget(reading: UsageReading, options: SelectOptions): Sel
           account,
           note:
             account.bindingResetsAt === undefined
-              ? `${account.headroomPct.toFixed(0)}% headroom, reset time unknown`
-              : `${account.headroomPct.toFixed(0)}% headroom, resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`,
+              ? `${formatWindowsUsed(account)}, ${account.bindingWindow} binds, reset time unknown`
+              : `${formatWindowsUsed(account)}, ${account.bindingWindow} binds, resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`,
         }));
       return finish(
         ranked,
@@ -367,7 +373,9 @@ export function selectTarget(reading: UsageReading, options: SelectOptions): Sel
             .filter((a) => a.headroomPct < needed)
             .map((account) => ({
               account,
-              reason: `${account.headroomPct.toFixed(0)}% is under the ${needed.toFixed(0)}% the running work is estimated to need`,
+              reason:
+                `${formatWindowsUsed(account)}; ${account.headroomPct.toFixed(0)}% headroom on its ` +
+                `binding ${account.bindingWindow} window is under the ${needed.toFixed(0)}% the running work needs`,
             })),
         ],
         reason:
