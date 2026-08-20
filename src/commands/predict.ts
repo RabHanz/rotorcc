@@ -55,7 +55,13 @@ export async function runPredict(options: PredictOptions): Promise<number> {
 
   const rows = reading.accounts.map((account) => {
     const rate = burnRateFrom(burn.series(account.number));
-    const prediction = predictThreshold(account.headroomPct, rate, config.thresholds.rotatePct);
+    const prediction = predictThreshold(
+      account.headroomPct,
+      rate,
+      config.thresholds.rotatePct,
+      Date.now(),
+      account.bindingWindow,
+    );
     const requirement =
       workload === null
         ? {
@@ -66,7 +72,12 @@ export async function runPredict(options: PredictOptions): Promise<number> {
         : estimateHeadroomNeeded(workload, rate.pctPerHour, {
             minimumPct: config.minTargetHeadroomPct,
           });
-    const finish = willFinishFirst(prediction, requirement.estimatedPct, account.headroomPct);
+    const finish = willFinishFirst(
+      prediction,
+      requirement.estimatedPct,
+      account.headroomPct,
+      account.bindingWindow,
+    );
     return { account, rate, prediction, requirement, finish };
   });
 

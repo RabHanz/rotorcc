@@ -97,6 +97,7 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
         rate,
         config.thresholds.rotatePct,
         nowDate.getTime(),
+        account.bindingWindow,
       );
       const needed =
         workload === null
@@ -108,7 +109,12 @@ export async function buildDashboardModel(options: BuildModelOptions): Promise<D
         accountNumber: account.number,
         rate,
         prediction,
-        finishesFirst: willFinishFirst(prediction, needed.estimatedPct, account.headroomPct),
+        finishesFirst: willFinishFirst(
+          prediction,
+          needed.estimatedPct,
+          account.headroomPct,
+          account.bindingWindow,
+        ),
       });
     }
   }

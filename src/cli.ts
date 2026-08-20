@@ -156,8 +156,8 @@ export const HELP = `rotorcc ${VERSION} — zero-loss account rotation for long 
 
 usage: rotorcc <command> [options]
 
-watching
-  tui                       live dashboard: headroom, unsaved work, decisions
+watching and driving
+  tui                       live dashboard you can act from (see the keys below)
   watch                     the same dashboard (alias)
   status                    one screen, printed once
   predict                   when the active account runs out, and how sure
@@ -221,6 +221,24 @@ options
   --once                    one iteration and exit (daemon, tui)
   --slot <n>, --email <e>, --alias <a>   for accounts add / add-token
   -h, --help, -v, --version
+
+keys in "rotorcc tui" / "rotorcc watch"
+  ↑↓ / j k                  move between accounts
+  enter, s                  switch to the selected account now
+  b                         rotate to the best target now, by the current strategy
+  d                         disable / enable the selected account
+  t                         change the rotation strategy
+  f                         force a quota re-poll, ignoring the poll floor
+  r                         refresh the screen without spending a quota request
+  w                         why has nothing happened — and act on it from there
+  p / ? / q                 pause · keys · quit
+Every acting key runs the same code as the matching command — enter is
+"rotorcc switch", d is "rotorcc accounts disable", t is "rotorcc config set
+strategy" — asks before it acts, and shows the result in the pane. A run whose
+stdout is not a terminal, and "--once", render one read-only frame with no keys.
+
+Every account row shows BOTH windows, 5h and 7d, each labelled and each as the
+share that has been USED. Which one binds is marked as well, never instead.
 
 exit codes for "daemon --once", so a cron job can branch on them
   0  nothing to do          headroom is fine; rotorcc changed nothing

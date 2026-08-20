@@ -259,18 +259,17 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
       return {
         kind: 'checkpoint',
         reason:
-          `the 5-hour window is down to ${activeView.fiveHourPct.toFixed(0)}% but the weekly ` +
-          `window is healthy at ${activeWeekly.pct?.toFixed(0) ?? '?'}%. Saving everything and ` +
-          "staying put: burning a second account's week to escape a window that refills in " +
-          'hours is a bad trade.',
+          `the active account has spent ${formatWindowsUsed(active)}: the 5-hour window is low ` +
+          'but the weekly window is healthy. Saving everything and staying put — burning a ' +
+          "second account's week to escape a window that refills in hours is a bad trade.",
       };
     }
     if (weeklyWarn) {
       return {
         kind: 'warn',
         reason:
-          `weekly window at ${activeWeekly.pct?.toFixed(0) ?? '?'}% headroom on ` +
-          `${activeWeekly.window}; approaching the ${config.weeklyRotatePct}% handover point`,
+          `the active account has spent ${formatWindowsUsed(active)}; its ${activeWeekly.window} ` +
+          `window is approaching the ${config.weeklyRotatePct}% headroom handover point`,
       };
     }
     if (weeklyUnknown) {
@@ -283,7 +282,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     }
     return {
       kind: 'none',
-      reason: `weekly headroom ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}; nothing to do`,
+      reason: `the active account has spent ${formatWindowsUsed(active)}; nothing to do`,
     };
   }
 
@@ -317,8 +316,8 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
       return {
         kind: 'checkpoint',
         reason:
-          `the weekly window is down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% and rotorcc could ` +
-          `not measure ${unmeasured.length} of the other account(s) ` +
+          `the active account has spent ${formatWindowsUsed(active)}, its weekly budget is spent, ` +
+          `and rotorcc could not measure ${unmeasured.length} of the other account(s) ` +
           `(${unmeasured.map((u) => `slot ${u.slot}: ${u.why}`).join('; ')}). ` +
           'It will NOT declare the machine out of quota on a reading it does not have, and it ' +
           'will not hand over to an account it cannot see. Everything has been checkpointed; ' +
@@ -341,7 +340,6 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
   const best = candidates.reduce((a, b) =>
     (weeklyHeadroom(b, models).pct ?? 0) > (weeklyHeadroom(a, models).pct ?? 0) ? b : a,
   );
-  const bestWeekly = weeklyHeadroom(best, models);
   const bestLabel = best.alias ?? best.email ?? `slot ${best.number}`;
 
   if (!config.rotation.enabled) {
@@ -354,8 +352,8 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     return {
       kind: 'checkpoint',
       reason:
-        `weekly window down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}, ` +
-        `and ${bestLabel} (slot ${best.number}) has ${bestWeekly.pct?.toFixed(0) ?? '?'}% left — ` +
+        `the active account has spent ${formatWindowsUsed(active)}, and ${bestLabel} ` +
+        `(slot ${best.number}) has spent ${formatWindowsUsed(best)} — ` +
         'but rotation is disabled in this configuration, so nothing was queued. ' +
         'Everything has been checkpointed; switch by hand when you are ready.',
     };
@@ -366,9 +364,10 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
     slot: best.number,
     window: activeWeekly.window,
     reason:
-      `weekly window down to ${activeWeekly.pct?.toFixed(0) ?? '?'}% on ${activeWeekly.window}. ` +
-      `The next session will open on ${bestLabel} (slot ${best.number}, ` +
-      `${bestWeekly.pct?.toFixed(0) ?? '?'}% weekly headroom). ` +
+      `the active account has spent ${formatWindowsUsed(active)}, so its ${activeWeekly.window} ` +
+      `budget is at or under the ${config.weeklyRotatePct}% headroom floor. ` +
+      `The next session will open on ${bestLabel} (slot ${best.number}, which has spent ` +
+      `${formatWindowsUsed(best)}). ` +
       (input.sessionAlive
         ? 'The running session is NOT being interrupted — it keeps its account until it ends.'
         : 'No session is running, so this takes effect immediately.'),

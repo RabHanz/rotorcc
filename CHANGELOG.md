@@ -3,6 +3,90 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed — both windows, always, on every surface (BREAKING for parsers)
+
+`rotorcc status` showed one figure per account: the window that binds. On
+2026-08-19 that reported an account as nearly dead. Its five-hour window was 99%
+spent; its week was 72% spent. Those are completely different situations — "wait
+forty minutes" and "finished until Sunday" — and one number cannot tell them
+apart.
+
+Every account row on every surface now carries **its 5h and its 7d, each
+labelled, each as the share that has been USED**: `status`, `status --json`,
+`accounts`, `accounts --json`, `tui`, `watch`, `predict`, `predict --json`, the
+resume manifest's table, the all-accounts-exhausted stop notice, the selector's
+candidate notes, and the flag reasons a live session reads. Which window binds
+is still marked — it is the one that will stop the work first — but it can never
+be the only thing on screen.
+
+The never-invent-a-number rule holds per window. A window rotorcc could not read
+prints `unknown` with the reason and is `null` in `--json` — never `0`, never
+`100`. Under a "used" convention the harmless-looking `?? 0` renders an
+unmeasured account as completely fresh, which would make the one account rotorcc
+cannot see the most attractive rotation target on the screen.
+
+**Breaking for anything parsing `--json`:**
+
+- `status --json` no longer dumps the internal reading. Each account is now the
+  same shape `accounts --json` emits, with `usedPct`, `headroomPct`,
+  `headroomKnown`, `bindingWindow`, `unknownReason` and a `windows` array.
+  `headroomPct` there used to be a **placeholder `0`** for an account rotorcc
+  could not measure; it is `null` now.
+- `windows` in every `--json` surface **always contains `5h` and `7d`**, even
+  when the account reported neither, and each entry gained `usedPct`, `binding`
+  and `unknownReason`. Per-model weekly caps follow them.
+- The manifest's `accounts.list[].headroomPct` is nullable and there is a new
+  `usedPct` and `windows`. Manifests written by 0.2.0 still parse.
+- The manifest's Markdown table replaced its `headroom` column with `5h used`
+  and `7d used`.
+
+### Added — the dashboard is a control surface
+
+> "needs interactive controls like cswap and not just be a glorified
+> observability!"
+
+`rotorcc tui` acts now. From the keyboard, without dropping to a shell:
+
+| key            | what it does                                           |
+| -------------- | ------------------------------------------------------ |
+| `↑↓` / `j` `k` | move between accounts                                  |
+| `enter` / `s`  | switch to the selected account now                     |
+| `b`            | rotate to the best target now, by the current strategy |
+| `d`            | disable / enable the selected account                  |
+| `t`            | change the rotation strategy                           |
+| `f`            | force a quota re-poll, ignoring the poll floor         |
+| `w`            | why has nothing happened — and act on it from there    |
+| `?`            | the keys                                               |
+
+**Every acting key runs the same code as the matching CLI verb** — `enter` is
+`rotorcc switch`, `d` is `rotorcc accounts disable`, `t` is `rotorcc config set
+strategy`, `w` → `c` is `rotorcc push-unpushed`. One implementation, one set of
+tests. A dashboard with its own switch has two switch implementations, and the
+one nobody tests is the one that runs at three in the morning. See
+[ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md).
+
+Each action asks first, with the target's spend on **both** windows in the
+question; only one runs at a time; each takes rotorcc's own tick lock so it
+cannot race the every-minute watcher; and the result is shown in the pane, with
+a failure taking over the screen rather than scrolling past.
+
+The `w` panel shows the last decision that did not act, what `selectTarget` says
+about every account right now — computed by the same function the watcher calls,
+not reconstructed from prose — and any raised flag with its reason. `c`
+checkpoints, `x` clears the raised flags, `f` re-polls.
+
+`--once`, and any run whose stdout is not a terminal, render one **read-only**
+frame: no cursor, no keys.
+
+### Fixed
+
+- `switchCommand` and the daemon's own switch now pass the credential store's
+  environment down to `switchAccount`, so Claude Code's advisory locks resolve
+  against the same home the credentials do. They did not before; on a normal
+  machine that was the same directory by luck.
+
 ## [0.2.0] — rotation without replacing the session
 
 ### Fixed — the checkpoint sweep damaged working branches (P0, 2026-08-19)

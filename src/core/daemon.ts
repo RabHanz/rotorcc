@@ -570,6 +570,9 @@ async function performSwitch(
       roster: manager.roster,
       credentials: manager.credentials,
       target: resolved.slot,
+      // As in `switchCommand`: the locks must resolve against the same Claude
+      // home the credentials do, or they guard nothing.
+      env: manager.credentials.env,
     });
     for (const warning of result.warnings) logger.warn(`switch: ${warning}`);
     return { ok: result.ok, detail: result.detail };

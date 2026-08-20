@@ -104,4 +104,18 @@ describe('the help text carries the contracts a script depends on', () => {
     expect(HELP).toContain('--token-status');
     expect(HELP).toContain('purge --yes');
   });
+
+  it('documents the dashboard keys, because a control surface nobody can find is not one', () => {
+    for (const key of ['switch to the selected account', 'rotate to the best target', 'disable']) {
+      expect(HELP).toContain(key);
+    }
+    // And the promise that makes them safe to learn: one implementation.
+    expect(HELP).toContain('the same code as the matching command');
+  });
+
+  it('states the display contract, so nobody has to infer it from a screenshot', () => {
+    expect(HELP).toContain('BOTH windows');
+    expect(HELP).toContain('5h and 7d');
+    expect(HELP).toContain('USED');
+  });
 });

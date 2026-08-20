@@ -697,6 +697,11 @@ export async function switchCommand(
     credentials: ctx.manager.credentials,
     target,
     dryRun: ctx.dryRun,
+    // The same environment the credential store reads and writes through.
+    // Left to default, the switch would take Claude Code's advisory locks in
+    // one home while moving credentials in another — which is to say, take no
+    // useful lock at all.
+    env: ctx.manager.credentials.env,
   });
 
   if (ctx.json) {

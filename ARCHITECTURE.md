@@ -71,7 +71,9 @@ src/
     load.ts              read, validate, expand paths, get/set one key
   core/
     paths.ts             per-platform config/state/data dirs; the project slug rule
-    usage.ts             parse the switcher's output -> headroom per account
+    usage.ts             readings -> per-window spend; the "both windows, both
+                         labelled, unknown stays unknown" formatting lives here
+                         and nowhere else
     decide.ts            PURE. thresholds, latches, hysteresis, cooldown, target
     daemon.ts            one tick: read, detect, decide, act. and the loop
     checkpoint.ts        the single operation everything funnels into
@@ -87,8 +89,23 @@ src/
     hookPayload.ts       the hook contract, written against captured payloads
     log.ts               logging with redaction
     proc.ts              execFile with an argv array; Windows shim resolution
+  tui/
+    model.ts             gather the machine into a DashboardModel
+    render.ts            PURE. (model, ui) -> string[]. no I/O, no clock
+    interaction.ts       PURE. the keyboard as a reducer: keys -> state + intent
+    actions.ts           the acting keys, as adapters over the CLI's own
+                         functions. no second implementation of anything
+    app.ts               terminal mechanics, timers, and the key loop
+    theme.ts             colour policy, ANSI-aware width/pad/truncate
   commands/              one file per verb
 ```
+
+The four TUI files are split along the axis that makes them testable: `render`
+and `interaction` are pure, so "an unknown is drawn as unknown" and "the
+confirmation was not skipped" are unit tests rather than things to notice in a
+terminal. `actions` is the only one that touches the world, and every branch in
+it delegates to the function a CLI verb already calls — see
+[ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md).
 
 ## The hook contract
 

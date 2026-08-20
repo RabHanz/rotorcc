@@ -60,17 +60,17 @@ rotorcc status                  # the same facts, printed once
 ```
 rotorcc 0.2.0                                                            20:20:47
 
-ACCOUNTS
-    #1  work                       ████████████████ 100% used 5h      resets 19 Aug 20:30
-    #2  spare                      ████████░░░░░░░░  55% used 7d      resets 24 Aug 09:00
-  ▸ #3  personal                   unknown                  quota read failed: http-429
-  thresholds: warn at 85% used · soft at 90% · rotate at 95%
+ACCOUNTS — how much of each window has been SPENT
+ ▸ #1  work              *5h ███████ 100% used   7d ████░░░  61% used  5h binds · resets 19 Aug 20:30
+   #2  spare              5h ██░░░░░  24% used  *7d ████░░░  55% used  7d binds · resets 24 Aug 09:00
+❯  #3  personal           5h unknown            7d unknown            binding window unknown — http-429
+  * the window that binds · thresholds: warn at 85% used · soft at 90% · rotate at 95% · strategy work-aware
 
 PREDICTION
   reaches 95% used in 2.3h
   18.4 points/hour · medium confidence · least-squares fit over 14 samples
   spanning 41 minutes (R²=0.79)
-  work finishes first? likely no — 45% left is under the estimated 62% needed
+  work finishes first? likely no — 45% headroom on 5h is under the estimated 62% needed
 
 WORK IN FLIGHT
   6 tree(s) hold work that is not on a remote (1 rotorcc cannot save on its own)
@@ -90,9 +90,21 @@ RECENT DECISIONS
   20:17 idle          84% used   nothing to do
 ```
 
-Note account #1: a **full bar at 100% used** — a real measurement of a spent
-window. Account #3 has **no bar at all**, because a full bar and a genuine
-"we could not read this" look identical and only one of them is a measurement.
+Every row carries **both windows**, each labelled, each as the share that has
+been spent. That is not decoration. Account #1 is out of its five-hour window
+and still has 39% of its week: it is unusable for the next forty minutes and
+perfectly healthy after that. Showing only the window that binds made those two
+situations look identical, and reported an account as dead when it was not.
+
+Account #1's 5h bar is **full at 100% used** — a real measurement of a spent
+window. Account #3 has **no bar at all on either window**, because a full bar
+and a genuine "we could not read this" look identical and only one of them is a
+measurement.
+
+The `❯` on account #3 is the cursor. The dashboard is a control surface, not a
+read-out: from it you can switch to an account, rotate to the best one, disable
+one, re-poll quota, change strategy, and ask why nothing has happened — without
+leaving the pane. Press `?` for the keys.
 
 ## Updating
 
@@ -268,12 +280,46 @@ Read this part. A backup tool that oversells itself is worse than none.
 
 |                         |                                                       |
 | ----------------------- | ----------------------------------------------------- |
-| `rotorcc tui` / `watch` | the live dashboard above                              |
+| `rotorcc tui` / `watch` | the live dashboard above, with keys                   |
 | `rotorcc tui --once`    | one frame and exit — cron-friendly, pipes cleanly     |
 | `rotorcc status`        | the same facts, printed once                          |
 | `rotorcc predict`       | when the active account runs out, with the confidence |
 
-In the dashboard: `q` quit, `r` refresh now, `p` pause.
+### Driving it from the dashboard
+
+|                |                                                        |
+| -------------- | ------------------------------------------------------ |
+| `↑↓` / `j` `k` | move between accounts                                  |
+| `enter` / `s`  | switch to the selected account now                     |
+| `b`            | rotate to the best target now, by the current strategy |
+| `d`            | disable / enable the selected account                  |
+| `t`            | change the rotation strategy                           |
+| `f`            | force a quota re-poll, ignoring the poll floor         |
+| `r`            | refresh the screen without spending a quota request    |
+| `w`            | why has nothing happened — and act on it from there    |
+| `p` `?` `q`    | pause · keys · quit                                    |
+
+Every acting key runs **the same code as the matching command**: `enter` is
+`rotorcc switch`, `d` is `rotorcc accounts disable`, `t` is `rotorcc config set
+strategy`, and `w` → `c` is `rotorcc push-unpushed`. There is one implementation
+of each and one set of tests for it — a dashboard with its own switch has two
+switch implementations, and the one nobody tests is the one that runs at three
+in the morning. See [ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md).
+
+Each of them asks before acting, with the target's spend on both windows in the
+question, and shows the result in the pane. Only one runs at a time, and each
+takes rotorcc's own tick lock first so it cannot race the every-minute watcher.
+
+`--once`, and any run whose stdout is not a terminal, render one **read-only**
+frame: no cursor, no keys. Handing a control surface to something that cannot
+answer a confirmation is worse than handing it nothing.
+
+The `w` panel answers the question a dashboard usually cannot. It shows the last
+decision that did not act, in the words the decision function used; what the
+selector says about every account right now, taken from the same `selectTarget`
+the watcher calls rather than reconstructed afterwards; and any raised flag with
+its reason. From inside it, `c` checkpoints everything, `x` clears the raised
+flags, and `f` re-polls.
 
 ### Accounts
 
@@ -505,13 +551,25 @@ hour and `99% (7d)` does not, and printing `99%` cannot tell you which you are
 looking at. Both of those caused a reporting error here before the convention
 changed.
 
-An account rotorcc could not measure has **no bar and no number**, on every
-screen, with the reason beside it.
+**Both windows are always shown, never just the one that binds.** An account at
+99% on its five-hour window and 72% on its week is unusable for forty minutes
+and healthy after that; an account at 99% on its week is finished until Sunday.
+One number cannot tell those apart, and rotorcc reported the first as the second
+before this rule existed. Which window binds is still marked — it is the one
+that will stop the work first — but it is never the only thing on screen.
 
-In `--json`, each account carries `usedPct`, `headroomPct` and `window`
-separately. `headroomPct` keeps its original meaning: inverting a field while
-keeping its name would make an existing reader see `99` and conclude "healthy"
-when it means "nearly gone". Both are `null` when the account was not measured.
+An account rotorcc could not measure has **no bar and no number, on either
+window**, on every screen, with the reason beside it. There is no fallback
+value: under a "used" convention the tempting `?? 0` renders an unmeasured
+account as completely fresh, which would make the one account rotorcc cannot
+see the most attractive rotation target on the screen.
+
+In `--json`, each account carries `usedPct`, `headroomPct`, `bindingWindow` and
+a `windows` array that **always contains `5h` and `7d`**, each with its own
+`usedPct`, `resetsAt` and a `binding` flag. `headroomPct` keeps its original
+meaning: inverting a field while keeping its name would make an existing reader
+see `99` and conclude "healthy" when it means "nearly gone". Everything that was
+not measured is `null` — never `0`, never `100`.
 
 ## Privacy and safety
 
@@ -653,6 +711,9 @@ timeline, and [docs/adr/](docs/adr/) for the decisions and what they rejected:
 - [ADR 0003](docs/adr/0003-live-credential-hot-swap.md) — the experiment showing
   a live session CAN be moved to another account, what that changed, and why the
   old mechanism is kept anyway.
+- [ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md) — why the
+  dashboard acts, and why every key it offers runs the CLI's own code rather
+  than a second implementation of it.
 
 ## Licence and attribution
 
