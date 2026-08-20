@@ -407,6 +407,63 @@ describe('the dashboard', () => {
     expect(text).not.toMatch(/idle\s+67%/);
   });
 
+  it('never draws a panel line wider than the terminal', () => {
+    // The box was `inner + 6` columns wide against an `inner` sized for
+    // `width - 4`, so on an 80-column terminal — the common SSH default — the
+    // frame's own width guard cut the right wall off every row.
+    const ui = {
+      cursor: 0,
+      overlay: { kind: 'help' as const },
+      paused: false,
+      busy: null,
+      lastOutcome: null,
+      note: null,
+    };
+    for (const width of [48, 60, 80, 100, 200]) {
+      const lines = renderDashboard(dashboard([incidentAccount()]), {
+        palette: colours,
+        width,
+        ui,
+      });
+      for (const line of lines) {
+        expect(line.length, `width ${width}: ${line}`).toBeLessThanOrEqual(width);
+      }
+      // And the right wall is actually there rather than truncated away.
+      expect(lines.some((l) => l.trimEnd().endsWith('│'))).toBe(true);
+    }
+  });
+
+  it('keeps the answer line when the panel itself is taller than the window', () => {
+    // Trimming the accounts above is not enough on its own: a panel taller than
+    // the terminal had its own tail cut by the frame slice, which is precisely
+    // the line saying which key answers it.
+    const ui = {
+      cursor: 0,
+      overlay: {
+        kind: 'confirm' as const,
+        action: { kind: 'switch' as const, slot: 2, label: 'switch to slot 2' },
+        prompt: Array.from({ length: 40 }, (_, i) => `prompt line ${i}`),
+      },
+      paused: false,
+      busy: null,
+      lastOutcome: null,
+      note: null,
+    };
+    const height = 18;
+    const visible = renderDashboard(dashboard([incidentAccount()]), {
+      palette: colours,
+      width: 120,
+      height,
+      ui,
+    })
+      .slice(0, Math.max(1, height - 2))
+      .join('\n');
+    expect(visible).toContain('switch to slot 2');
+    expect(visible).toContain('cancel');
+    // And it says what it dropped rather than just stopping.
+    expect(visible).toContain('not shown');
+  });
+
   it('keeps an open panel inside a short terminal, dropping accounts instead', () => {
     // `app.ts` trims the frame to the window. A panel appended below eight
     // account rows on a 24-row terminal put the question — and the line saying
@@ -531,6 +588,44 @@ describe('the resume manifest', () => {
     const markdown = renderManifestMarkdown(manifest);
     expect(markdown).toContain('| unknown | unknown |');
     expect(markdown).not.toContain('| 0% | 0% |');
+  });
+
+  it("does NOT turn an older manifest's placeholder zero into a confident 100%", () => {
+    // 0.2.0 wrote `headroomPct` unconditionally, and that field is a
+    // PLACEHOLDER zero for an account it could not measure. What makes the
+    // fallback safe is that such an account was always written with
+    // `bindingWindow: 'unknown'` beside it, so it never matches '5h' or '7d'.
+    // Without that, `100 - 0` would print as `100%` — the most emphatic
+    // possible way to say "we never read this".
+    const old = parseManifest({
+      ...(JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>),
+      accounts: {
+        activeNumber: 1,
+        targetNumber: null,
+        observedAt: '2026-08-20T01:00:00Z',
+        list: [
+          {
+            number: 1,
+            label: 'never-read',
+            headroomPct: 0,
+            bindingWindow: 'unknown',
+            resetsAt: null,
+            active: true,
+          },
+          {
+            number: 2,
+            label: 'api-key-slot',
+            headroomPct: 0,
+            bindingWindow: 'n/a',
+            resetsAt: null,
+            active: false,
+          },
+        ],
+      },
+    });
+    const markdown = renderManifestMarkdown(old);
+    expect(markdown).not.toContain('100%');
+    expect(markdown.match(/\| unknown \| unknown \|/g)?.length).toBe(2);
   });
 
   it('re-renders an older manifest from the one figure it does carry', () => {

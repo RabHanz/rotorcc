@@ -91,6 +91,62 @@ export function normaliseKey(chunk: string): string | null {
   return null;
 }
 
+export interface GatherRequest {
+  /** Read even while the operator has paused the background refresh. */
+  ignorePause?: boolean;
+  /** Poll the provider, ignoring the per-account poll floor. */
+  force?: boolean;
+}
+
+/** Fold a request that arrived mid-flight into whatever was already queued. */
+export function mergeGatherRequests(
+  queued: GatherRequest | null,
+  incoming: GatherRequest,
+): GatherRequest {
+  return {
+    ignorePause: true,
+    force: incoming.force === true || queued?.force === true,
+  };
+}
+
+/**
+ * Run `work` so that a request arriving while it is running produces exactly
+ * one more run afterwards, with the two requests merged.
+ *
+ * Dropping the later request is the tempting version and it is wrong here. The
+ * refresh after an action must not be discarded because the every-fifteen-
+ * seconds one happened to start a few hundred milliseconds earlier: that run's
+ * reading was taken BEFORE the credential moved, so the pane would sit there
+ * reporting a successful switch above an account table still marking the old
+ * account as active, until the next interval fired. An operator reading the
+ * table rather than the outcome line would then switch a second time.
+ */
+export function coalescingRunner<T>(
+  work: (request: T) => Promise<void>,
+  merge: (queued: T | null, incoming: T) => T,
+): (request: T) => Promise<void> {
+  let running = false;
+  let queued: T | null = null;
+  const run = async (request: T): Promise<void> => {
+    if (running) {
+      queued = merge(queued, request);
+      return;
+    }
+    running = true;
+    try {
+      await work(request);
+    } finally {
+      running = false;
+      const next = queued;
+      if (next !== null) {
+        queued = null;
+        await run(next);
+      }
+    }
+  };
+  return run;
+}
+
 /** Render one frame to a string. Used by `--once` and by the tests. */
 export async function renderOnce(options: TuiOptions): Promise<string> {
   const stdout = options.stdout ?? process.stdout;
@@ -180,16 +236,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     stdout.write(`${CLEAR_HOME}${body.join('\n')}\n\n${footer(colours, { paused: ui.paused })}`);
   };
 
-  /**
-   * `ignorePause` and `force` are deliberately separate.
-   *
-   * `r` means "read the machine again now" and must not spend a quota request
-   * per keypress; `f` means "poll the provider, ignoring the floor". Folding
-   * them into one flag turned an idle operator holding `r` into a rate-limit
-   * incident of their own making.
-   */
-  const gather = async (opts: { ignorePause?: boolean; force?: boolean } = {}): Promise<void> => {
-    if (gathering || (ui.paused && opts.ignorePause !== true)) return;
+  const gatherOnce = async (opts: GatherRequest): Promise<void> => {
     gathering = true;
     try {
       model = await buildDashboardModel({
@@ -210,6 +257,21 @@ export async function runTui(options: TuiOptions): Promise<number> {
     }
   };
 
+  const runGather = coalescingRunner(gatherOnce, mergeGatherRequests);
+
+  /**
+   * `ignorePause` and `force` are deliberately separate.
+   *
+   * `r` means "read the machine again now" and must not spend a quota request
+   * per keypress; `f` means "poll the provider, ignoring the floor". Folding
+   * them into one flag turned an idle operator holding `r` into a rate-limit
+   * incident of their own making.
+   */
+  const gather = async (opts: GatherRequest = {}): Promise<void> => {
+    if (ui.paused && opts.ignorePause !== true) return;
+    await runGather(opts);
+  };
+
   const actionContext = (): ActionContext => ({
     config,
     store: options.store,
@@ -221,10 +283,20 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const perform = async (action: Parameters<typeof runAction>[1]): Promise<void> => {
     const outcome = await runAction(actionContext(), action);
-    if (action.kind === 'set-strategy' && outcome.ok && action.strategy !== undefined) {
+    if (
+      action.kind === 'set-strategy' &&
+      outcome.ok &&
+      !options.dryRun &&
+      action.strategy !== undefined
+    ) {
       // Keep the pane truthful about what it just changed. The file is the
       // source of truth; this is the in-memory copy catching up so the header
       // and the next confirmation do not quote the old rule.
+      //
+      // NOT under --dry-run. The action reports success there because it
+      // successfully did nothing, and adopting the strategy anyway would make
+      // the header, the picker's "(in force)" mark and the `w` panel's whole
+      // selection answer describe a rule the watcher will never use.
       config = { ...config, strategy: action.strategy };
     }
     ui = applyOutcome(ui, outcome);

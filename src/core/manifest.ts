@@ -334,6 +334,14 @@ export function renderManifestMarkdown(manifest: Manifest): string {
       // figure and the window it belonged to. Rendering that as `unknown`
       // would throw away a measurement that is right there in the file — and
       // this document's whole job is to be readable six weeks later.
+      //
+      // `bindingWindow` is what makes this safe, and it is doing real work
+      // rather than being an incidental match. An unmeasured account has always
+      // been written with `bindingWindow: 'unknown'` (or `'n/a'` for an
+      // API-key slot) beside its placeholder `headroomPct: 0`, so those never
+      // equal `'5h'` or `'7d'` and never reach the conversion below. Without
+      // that guard a placeholder zero would render as a confident `100%` — the
+      // most emphatic possible way to say "we never read this".
       if (account.bindingWindow === name) {
         if (account.usedPct !== null) return `${account.usedPct.toFixed(0)}%`;
         if (account.headroomPct !== null) return `${(100 - account.headroomPct).toFixed(0)}%`;

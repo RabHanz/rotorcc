@@ -318,28 +318,32 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   }
 
   if (ui !== undefined && ui.overlay.kind !== 'none') {
-    const panel = overlayLines(ui, model, c, width).map((line) => truncateVisible(line, width));
-    let head = lines.slice(0, reportStartsAt);
     // The panel is what the operator has to read and answer, so it is the part
-    // that must fit. `app.ts` trims the frame to the window, so appending the
-    // panel to a head taller than the terminal pushed the question — and the
-    // `y / cancel` line under it — off the bottom on a short screen with a lot
-    // of accounts. The accounts above it lose lines instead; they are context,
-    // and the panel already carries the numbers the question turns on.
+    // that must fit, and "fit" has to hold in both directions. `app.ts` trims
+    // the frame to the window, so a panel appended below a tall account list
+    // lost its question off the bottom — and a panel TALLER than the window
+    // lost its answer line the same way, because the slice cuts the tail. The
+    // accounts above are trimmed first; if that is not enough the panel trims
+    // its own middle, which is the only cut that keeps both the question's
+    // heading and the keys that answer it.
     const height = options.height;
-    if (height !== undefined) {
-      const room = Math.max(1, height - 2);
-      if (head.length + panel.length > room) {
-        // Keep the two header lines whatever happens; drop account rows from
-        // the bottom up, and say how many are not shown rather than silently
-        // ending the list.
-        const keep = Math.max(2, room - panel.length - 1);
-        if (head.length > keep) {
-          head = [
-            ...head.slice(0, keep),
-            c.dim(`  … ${head.length - keep} more line(s) above the panel`),
-          ];
-        }
+    const room = height === undefined ? undefined : Math.max(4, height - 2);
+    const headroomForPanel =
+      room === undefined ? undefined : Math.max(6, room - MIN_HEAD_LINES_WITH_PANEL);
+    const panel = overlayLines(ui, model, c, width, headroomForPanel).map((line) =>
+      truncateVisible(line, width),
+    );
+    let head = lines.slice(0, reportStartsAt);
+    if (room !== undefined && head.length + panel.length > room) {
+      // Keep the two header lines whatever happens; drop account rows from the
+      // bottom up, and say how many are not shown rather than silently ending
+      // the list.
+      const keep = Math.max(2, room - panel.length - 1);
+      if (head.length > keep) {
+        head = [
+          ...head.slice(0, keep),
+          c.dim(`  … ${head.length - keep} more line(s) above the panel`),
+        ];
       }
     }
     return [...head, ...panel];
@@ -348,17 +352,45 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   return lines;
 }
 
-/** A boxed panel. Plain characters, because this has to survive every terminal. */
-function panel(title: string, body: string[], c: Palette, width: number): string[] {
-  const inner = Math.max(20, Math.min(width, 96) - 4);
+/** Header lines kept above an open panel before the panel starts shrinking. */
+const MIN_HEAD_LINES_WITH_PANEL = 3;
+
+/**
+ * A boxed panel. Plain characters, because this has to survive every terminal.
+ *
+ * `maxLines`, when given, is a hard ceiling on the whole box. Over it, the body
+ * loses its MIDDLE and says how much: the title and the last body line — which
+ * is always the line naming the keys that answer this panel — are the two
+ * things that must never be the ones cut.
+ *
+ * The width arithmetic is deliberate and was wrong once: an emitted line is
+ * `'  │ ' + inner + ' │'`, which is `inner + 6` columns, so `inner` has to be
+ * `width - 6` and not `width - 4`. It was the latter, and every box on an
+ * 80-column terminal — the common SSH default — had its right wall truncated
+ * away by the frame's own width guard.
+ */
+function panel(
+  title: string,
+  body: string[],
+  c: Palette,
+  width: number,
+  maxLines?: number,
+): string[] {
+  const inner = Math.max(10, Math.min(width, 96) - 6);
   const rule = '─'.repeat(inner);
-  return [
-    `  ┌─${rule}─┐`,
-    `  │ ${padVisible(truncateVisible(c.bold(title), inner), inner)} │`,
-    `  ├─${rule}─┤`,
-    ...body.map((line) => `  │ ${padVisible(truncateVisible(line, inner), inner)} │`),
-    `  └─${rule}─┘`,
-  ];
+  const row = (line: string): string => `  │ ${padVisible(truncateVisible(line, inner), inner)} │`;
+
+  let shown = body;
+  if (maxLines !== undefined) {
+    const bodyRoom = maxLines - 4;
+    if (bodyRoom >= 2 && body.length > bodyRoom) {
+      const last = body[body.length - 1] ?? '';
+      const head = body.slice(0, Math.max(0, bodyRoom - 2));
+      shown = [...head, c.dim(`… ${body.length - head.length - 1} more line(s) not shown`), last];
+    }
+  }
+
+  return [`  ┌─${rule}─┐`, row(c.bold(title)), `  ├─${rule}─┤`, ...shown.map(row), `  └─${rule}─┘`];
 }
 
 /**
@@ -368,7 +400,13 @@ function panel(title: string, body: string[], c: Palette, width: number): string
  * hatch is not written on it is a dialog somebody force-quits the terminal to
  * get out of.
  */
-function overlayLines(ui: UiState, model: DashboardModel, c: Palette, width: number): string[] {
+function overlayLines(
+  ui: UiState,
+  model: DashboardModel,
+  c: Palette,
+  width: number,
+  maxLines?: number,
+): string[] {
   switch (ui.overlay.kind) {
     case 'none':
       return [];
@@ -383,6 +421,7 @@ function overlayLines(ui: UiState, model: DashboardModel, c: Palette, width: num
         ],
         c,
         width,
+        maxLines,
       );
 
     case 'strategy': {
@@ -411,11 +450,18 @@ function overlayLines(ui: UiState, model: DashboardModel, c: Palette, width: num
         ],
         c,
         width,
+        maxLines,
       );
     }
 
     case 'why':
-      return panel('why has nothing happened?', whyBody(model, c), c, width);
+      return panel(
+        'why has nothing happened?',
+        whyBody(model, c, Math.max(10, Math.min(width, 96) - 6)),
+        c,
+        width,
+        maxLines,
+      );
 
     case 'outcome': {
       const done = ui.overlay.outcome;
@@ -429,11 +475,12 @@ function overlayLines(ui: UiState, model: DashboardModel, c: Palette, width: num
         ],
         c,
         width,
+        maxLines,
       );
     }
 
     case 'help':
-      return panel('keys', helpBody(c), c, width);
+      return panel('keys', helpBody(c), c, width, maxLines);
   }
 }
 
@@ -477,8 +524,15 @@ function helpBody(c: Palette): string[] {
  * same `selectTarget` the watcher calls, so what is on screen is what the
  * decision actually saw.
  */
-function whyBody(model: DashboardModel, c: Palette): string[] {
+function whyBody(model: DashboardModel, c: Palette, inner: number): string[] {
   const body: string[] = [];
+  // Wrapped to the panel's own width, not cut at a fixed column. These reason
+  // strings are the entire content of this panel — they are why it exists — and
+  // they got longer in the same change that added both windows to every one of
+  // them. A panel that silently ends an explanation mid-sentence is reporting a
+  // partial answer as if it were the whole one.
+  const wrapped = (text: string, indent: string): string[] =>
+    wrap(text, Math.max(20, inner - indent.length)).map((chunk) => `${indent}${chunk}`);
 
   const refusal = model.lastRefusal;
   body.push(c.dim('last decision that did not act'));
@@ -486,7 +540,7 @@ function whyBody(model: DashboardModel, c: Palette): string[] {
     body.push('  none recorded — rotorcc has not refused or blocked anything yet');
   } else {
     body.push(`  ${refusal.at.slice(0, 16).replace('T', ' ')}  ${c.bad(refusal.kind)}`);
-    for (const chunk of wrap(refusal.reason, 84)) body.push(`  ${chunk}`);
+    for (const chunk of wrapped(refusal.reason, '  ')) body.push(chunk);
   }
   body.push('');
 
@@ -494,9 +548,11 @@ function whyBody(model: DashboardModel, c: Palette): string[] {
   if (model.selection === null) {
     body.push('  no reading to select over');
   } else {
-    body.push(`  ${model.selection.reason.slice(0, 200)}`);
+    for (const chunk of wrapped(model.selection.reason, '  ')) body.push(chunk);
     for (const entry of model.selection.rejected) {
-      body.push(`  ${c.dim(`#${entry.account.number}`)} ${entry.reason}`);
+      for (const chunk of wrapped(`#${entry.account.number} ${entry.reason}`, '  ')) {
+        body.push(chunk);
+      }
     }
   }
   body.push('');
@@ -505,7 +561,7 @@ function whyBody(model: DashboardModel, c: Palette): string[] {
     body.push(c.dim('flags raised'));
     for (const flag of model.raisedFlags) {
       body.push(`  ${c.warn(flag.name)} ${c.dim(flag.raisedAt.slice(11, 16))}`);
-      for (const chunk of wrap(flag.reason, 84)) body.push(`    ${chunk}`);
+      for (const chunk of wrapped(flag.reason, '    ')) body.push(chunk);
     }
     body.push('');
   }
@@ -531,7 +587,16 @@ function whyBody(model: DashboardModel, c: Palette): string[] {
   return body;
 }
 
-/** Break a long reason across lines without cutting a word in half. */
+/**
+ * Break a long reason across lines without cutting a word in half.
+ *
+ * Capped, because a single reason must not push everything else out of the
+ * panel — but the cap SAYS SO. A silent slice reports a partial explanation as
+ * if it were the whole one, which is the same defect as a partial measurement
+ * reported as a whole one.
+ */
+const WRAP_MAX_LINES = 6;
+
 function wrap(text: string, width: number): string[] {
   const words = text.split(/\s+/);
   const lines: string[] = [];
@@ -545,7 +610,8 @@ function wrap(text: string, width: number): string[] {
     }
   }
   if (current !== '') lines.push(current);
-  return lines.slice(0, 6);
+  if (lines.length <= WRAP_MAX_LINES) return lines;
+  return [...lines.slice(0, WRAP_MAX_LINES), `… ${lines.length - WRAP_MAX_LINES} more line(s)`];
 }
 
 /**

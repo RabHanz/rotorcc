@@ -30,6 +30,7 @@ import {
   Store,
 } from '../src/core/state.js';
 import { type ActionContext, runAction } from '../src/tui/actions.js';
+import { runTui } from '../src/tui/app.js';
 import type { PendingAction } from '../src/tui/interaction.js';
 import { cleanup, quietLogger, tempDir } from './helpers.js';
 
@@ -361,6 +362,92 @@ describe('what the pane shows afterwards', () => {
     expect(outcome.title).toBe('disable slot 2');
     expect(outcome.lines.length).toBeGreaterThan(0);
     expect(Date.parse(outcome.at)).not.toBeNaN();
+  });
+});
+
+describe('the read-only frame', () => {
+  /** A stdout that is not a terminal, which is what a pipe or a cron mail is. */
+  function fakeStdout(): { stream: NodeJS.WriteStream; written: () => string } {
+    const chunks: string[] = [];
+    const stream = {
+      isTTY: false,
+      columns: 120,
+      rows: 40,
+      write: (chunk: string) => {
+        chunks.push(chunk);
+        return true;
+      },
+      on: () => stream,
+      off: () => stream,
+    } as unknown as NodeJS.WriteStream;
+    return { stream, written: () => chunks.join('') };
+  }
+
+  /** A stdin that records whether anybody tried to take the keyboard. */
+  function fakeStdin(): { stream: NodeJS.ReadStream; rawModeCalls: () => number } {
+    let calls = 0;
+    const stream = {
+      isTTY: true,
+      setRawMode: () => {
+        calls += 1;
+        return stream;
+      },
+      resume: () => stream,
+      pause: () => stream,
+      setEncoding: () => stream,
+      on: () => stream,
+    } as unknown as NodeJS.ReadStream;
+    return { stream, rawModeCalls: () => calls };
+  }
+
+  it('renders one frame and takes no keyboard when stdout is not a terminal', async () => {
+    const w = await world();
+    const out = fakeStdout();
+    const input = fakeStdin();
+
+    const code = await runTui({
+      config: w.ctx.config,
+      store: w.store,
+      manager: w.manager,
+      logger: quietLogger,
+      configPath: w.configPath,
+      dryRun: false,
+      stdout: out.stream,
+      stdin: input.stream,
+    });
+
+    expect(code).toBe(0);
+    const frame = out.written();
+    expect(frame).toContain('ACCOUNTS');
+    // No cursor, no panel: a frame going into a cron mail must not look like a
+    // control surface, and nothing may put a pipe's stdin into raw mode.
+    expect(frame).not.toContain('❯');
+    expect(frame).not.toContain('┌─');
+    expect(input.rawModeCalls()).toBe(0);
+    // And no alternate screen, which would be escape codes in a log file.
+    expect(frame).not.toContain('[?1049h');
+  });
+
+  it('does the same for --once even on a real terminal', async () => {
+    const w = await world();
+    const out = fakeStdout();
+    (out.stream as unknown as { isTTY: boolean }).isTTY = true;
+    const input = fakeStdin();
+
+    await runTui({
+      config: w.ctx.config,
+      store: w.store,
+      manager: w.manager,
+      logger: quietLogger,
+      configPath: w.configPath,
+      dryRun: false,
+      once: true,
+      stdout: out.stream,
+      stdin: input.stream,
+    });
+
+    expect(input.rawModeCalls()).toBe(0);
+    expect(out.written()).not.toContain('❯');
   });
 });
 

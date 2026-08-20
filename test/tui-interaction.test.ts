@@ -20,7 +20,12 @@ import {
   handleKey,
   initialUiState,
 } from '../src/tui/interaction.js';
-import { normaliseKey } from '../src/tui/app.js';
+import {
+  type GatherRequest,
+  coalescingRunner,
+  mergeGatherRequests,
+  normaliseKey,
+} from '../src/tui/app.js';
 
 const UP = '\u001b[A';
 const DOWN = '\u001b[B';
@@ -323,6 +328,49 @@ describe('what counts as one key press', () => {
     expect(normaliseKey('ddddd')).toBeNull();
     expect(normaliseKey('sy')).toBeNull();
     expect(normaliseKey('some pasted text\r')).toBeNull();
+  });
+});
+
+describe('refresh requests that arrive mid-flight', () => {
+  it('runs exactly once more afterwards, rather than being dropped', async () => {
+    // The refresh after an action must not be discarded because the periodic
+    // one started a few hundred milliseconds earlier: that run's reading was
+    // taken BEFORE the credential moved, so the pane would report a successful
+    // switch above an account table still marking the old account active.
+    const seen: GatherRequest[] = [];
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let first = true;
+    const run = coalescingRunner<GatherRequest>(async (request) => {
+      seen.push(request);
+      if (first) {
+        first = false;
+        await gate;
+      }
+    }, mergeGatherRequests);
+
+    const inFlight = run({});
+    // Three requests while the first is running collapse into one follow-up.
+    void run({ force: false });
+    void run({ force: true });
+    void run({ force: false });
+    release();
+    await inFlight;
+
+    expect(seen).toHaveLength(2);
+    // And the merge keeps the strongest request: one of them asked to re-poll.
+    expect(seen[1]).toEqual({ ignorePause: true, force: true });
+  });
+
+  it('does nothing extra when nothing arrived while it ran', async () => {
+    const seen: GatherRequest[] = [];
+    const run = coalescingRunner<GatherRequest>(async (request) => {
+      seen.push(request);
+    }, mergeGatherRequests);
+    await run({ force: true });
+    expect(seen).toEqual([{ force: true }]);
   });
 });
 
