@@ -357,6 +357,56 @@ describe('the dashboard', () => {
     expect(line).toMatch(/\*5h/);
   });
 
+  it('gives a per-model cap its own line, with a gap before its figure', () => {
+    // `Fable13% used`, seen on a real machine: the name column was a fixed
+    // three characters, so a longer window name ate the separator and the
+    // figure ran straight into it.
+    const capped = incidentAccount({
+      windows: [
+        { name: '5h', headroomPct: 1 },
+        { name: '7d', headroomPct: 28 },
+        { name: 'opus-7d', headroomPct: 87 },
+      ],
+    });
+    for (const width of [84, 200]) {
+      const line =
+        renderDashboard(dashboard([capped]), { palette: colours, width }).find((l) =>
+          l.includes('opus-7d'),
+        ) ?? '';
+      expect(line, `width ${width}`).toMatch(/opus-7d\s/);
+      expect(line, `width ${width}`).not.toMatch(/opus-7d\d/);
+      expect(line, `width ${width}`).toContain('13% used');
+    }
+  });
+
+  it('reports a past decision as spend with its window, not as bare headroom', () => {
+    // A journal line reading `67%` beside an accounts panel reading `33% used`
+    // is the same account in two conventions on one screen.
+    const model = dashboard([incidentAccount()]);
+    const text = renderDashboard(
+      {
+        ...model,
+        decisions: [
+          {
+            at: '2026-08-20T01:44:00Z',
+            kind: 'idle' as const,
+            activeAccount: 1,
+            targetAccount: null,
+            headroomPct: 67,
+            bindingWindow: '5h',
+            reason: 'nothing to do',
+            strategy: 'work-aware',
+            dryRun: false,
+            unsavedTrees: null,
+          },
+        ],
+      },
+      { palette: colours, width: 200 },
+    ).join('\n');
+    expect(text).toContain('33% used (5h)');
+    expect(text).not.toMatch(/idle\s+67%/);
+  });
+
   it('draws no cursor and no panel when there is no keyboard', () => {
     // `--once`, and anything piped, render a read-only frame. A frame going
     // into a cron mail has no cursor, and must not look like a control surface.
@@ -474,6 +524,29 @@ describe('the resume manifest', () => {
     expect(old.accounts.list[0]?.windows).toEqual([]);
     expect(old.accounts.list[0]?.headroomPct).toBe(4);
     expect(renderManifestMarkdown(old)).toContain('| unknown | unknown |');
+  });
+});
+
+describe('the decision reason a tick records', () => {
+  it('names both windows and which one binds', async () => {
+    const { decide } = await import('../src/core/decide.js');
+    const { emptyState } = await import('../src/core/decide.js');
+    const decision = decide(
+      {
+        observedAt: '2026-08-20T01:00:00Z',
+        activeAccountNumber: 1,
+        accounts: [incidentAccount({ headroomPct: 60, bindingWindow: '7d' })],
+        source: 'native',
+      },
+      testConfig(),
+      emptyState(),
+    );
+    // This reason is what lands in the decision journal, the tick's `--json`
+    // output and the log. Read six hours later, "headroom 67% on 5h" cannot
+    // tell you whether the week was also nearly gone.
+    expect(decision.reason).toContain('5h 99% used');
+    expect(decision.reason).toContain('7d 72% used');
+    expect(decision.reason).toContain('binds');
   });
 });
 

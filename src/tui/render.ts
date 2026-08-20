@@ -549,9 +549,16 @@ function windowCell(
   thresholds: DashboardModel['thresholds'],
   c: Palette,
   showBar: boolean,
+  /**
+   * Column width for the name. Three fits `5h` and `7d`, which is every
+   * headline cell; a per-model cap like `opus-7d` is rendered on its own line
+   * and passes its own width, so a long name never eats the space before its
+   * figure — which is exactly what `Fable13% used` looked like.
+   */
+  nameWidth = 3,
 ): string {
   const mark = window.binding ? c.accent('*') : ' ';
-  const name = c.dim(padVisible(window.name, 3));
+  const name = c.dim(padVisible(window.name, Math.max(nameWidth, window.name.length + 1)));
   if (window.usedPct === null) {
     // No bar and no number. An empty bar and a bar for a genuine 0% look
     // identical, and only one of them is a measurement — and under a used
@@ -607,7 +614,8 @@ function accountLines(
     // Per-model weekly caps. A full one stops the work exactly as hard as the
     // account-wide window, so it is never dropped — only ranked below.
     lines.push(
-      `${' '.repeat(7)}${padVisible('', 18)} ${windowCell(extra, model.thresholds, c, showBar)}`,
+      `${' '.repeat(7)}${padVisible('', 18)} ` +
+        windowCell(extra, model.thresholds, c, showBar, extra.name.length + 1),
     );
   }
   return lines;
@@ -662,12 +670,16 @@ function decisionLine(entry: DecisionEntry, c: Palette): string {
           : c.dim;
   const time = c.dim(entry.at.slice(11, 16));
   const kind = padVisible(kindColour(entry.kind), 14);
-  const headroom =
+  // Spend, with its window, exactly like every other figure on the screen. This
+  // column used to print the stored HEADROOM as a bare percentage, so a journal
+  // line read `67%` beside an accounts panel reading `33% used` — the same
+  // account, two conventions, on one screen.
+  const spend =
     entry.headroomPct === null
-      ? c.unknown(padVisible(UNKNOWN, 8))
-      : padVisible(`${entry.headroomPct.toFixed(0)}%`, 8);
+      ? c.unknown(padVisible(UNKNOWN, 16))
+      : padVisible(`${(100 - entry.headroomPct).toFixed(0)}% used (${entry.bindingWindow})`, 16);
   const dry = entry.dryRun ? c.bad('[dry] ') : '';
-  return `${time} ${kind}${headroom}${dry}${c.dim(truncateVisible(entry.reason, 90))}`;
+  return `${time} ${kind}${spend}${dry}${c.dim(truncateVisible(entry.reason, 80))}`;
 }
 
 /**
