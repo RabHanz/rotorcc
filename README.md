@@ -297,6 +297,7 @@ Read this part. A backup tool that oversells itself is worse than none.
 | `f`            | force a quota re-poll, ignoring the poll floor         |
 | `r`            | refresh the screen without spending a quota request    |
 | `w`            | why has nothing happened — and act on it from there    |
+| `o`            | the last action's full output                          |
 | `p` `?` `q`    | pause · keys · quit                                    |
 
 Every acting key runs **the same code as the matching command**: `enter` is
@@ -307,8 +308,11 @@ switch implementations, and the one nobody tests is the one that runs at three
 in the morning. See [ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md).
 
 Each of them asks before acting, with the target's spend on both windows in the
-question, and shows the result in the pane. Only one runs at a time, and each
-takes rotorcc's own tick lock first so it cannot race the every-minute watcher.
+question, and shows the result in the pane. Only one runs at a time, by whatever
+route the key arrived, and each takes rotorcc's own tick lock first so it cannot
+race the every-minute watcher — a lock a live watcher holds is waited for, never
+broken. `q` during an action leaves once it finishes rather than exiting
+part-way through a credential switch; press it again to leave anyway.
 
 `--once`, and any run whose stdout is not a terminal, render one **read-only**
 frame: no cursor, no keys. Handing a control surface to something that cannot

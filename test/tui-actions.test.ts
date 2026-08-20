@@ -343,10 +343,25 @@ describe('checkpointing from the why panel', () => {
       action({ kind: 'checkpoint', label: 'checkpoint every watched tree' }),
     );
     // The configured project does not exist in this temp world, so there is
-    // genuinely nothing to save. The contract being checked is that it says so
-    // rather than reporting a success it did not have.
-    expect(outcome.lines.length).toBeGreaterThan(0);
+    // genuinely nothing to save — but the checkpoint has to have RUN. Asserting
+    // only that some output exists would stay green if `performCheckpoint`
+    // threw, because the catch produces one line under the same title.
+    expect(outcome.ok).toBe(true);
     expect(outcome.title).toBe('checkpoint every watched tree');
+    expect(outcome.lines[0]).toMatch(/\d+ checkpointed · \d+ pushed · \d+ SKIPPED · \d+ failed/);
+    expect(outcome.lines.join('\n')).not.toContain('the action failed');
+  });
+
+  it('leads with a summary, so a skip cannot be hidden by the four-line preview', async () => {
+    const w = await world();
+    const outcome = await runAction(
+      w.ctx,
+      action({ kind: 'checkpoint', label: 'checkpoint every watched tree' }),
+    );
+    // The pane shows the first few lines. A tree rotorcc could not save is
+    // exactly the fact that must survive being summarised: an operator who
+    // cannot see it rotates believing everything was saved.
+    expect(outcome.lines[0]).toContain('SKIPPED');
   });
 });
 

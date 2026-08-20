@@ -212,17 +212,36 @@ export interface WindowUsed {
  */
 export function windowsUsedOf(account: AccountReading): WindowUsed[] {
   const known = headroomIsKnown(account);
+  const reason = account.unknownReason ?? 'not measured';
   const clamp = (value: number): number => Math.max(0, Math.min(100, value));
-  const from = (window: WindowReading): WindowUsed => ({
-    name: window.name,
-    usedPct: clamp(100 - window.headroomPct),
-    headroomPct: clamp(window.headroomPct),
-    resetsAt: window.resetsAt ?? null,
-    // Nothing binds on an account whose headline figure is unknown: the binding
-    // window is precisely the fact that could not be established.
-    binding: known && account.bindingWindow === window.name,
-    unknownReason: null,
+
+  // `headroomIsKnown` is the ONE place this project answers "is this a
+  // measurement", and a surface that second-guesses it per window is how a rule
+  // stops being enforceable. An account whose headline could not be established
+  // reports every window as unknown, even where it still carries entries from
+  // an earlier read — otherwise one object would assert both "never measured"
+  // and "12% used", and the row would print a bar beside the words "binding
+  // window unknown".
+  const unmeasured = (name: string, why: string): WindowUsed => ({
+    name,
+    usedPct: null,
+    headroomPct: null,
+    resetsAt: null,
+    binding: false,
+    unknownReason: why,
   });
+
+  const from = (window: WindowReading): WindowUsed =>
+    known
+      ? {
+          name: window.name,
+          usedPct: clamp(100 - window.headroomPct),
+          headroomPct: clamp(window.headroomPct),
+          resetsAt: window.resetsAt ?? null,
+          binding: account.bindingWindow === window.name,
+          unknownReason: null,
+        }
+      : unmeasured(window.name, reason);
 
   const rows: WindowUsed[] = [];
   for (const name of HEADLINE_WINDOWS) {
@@ -231,16 +250,7 @@ export function windowsUsedOf(account: AccountReading): WindowUsed[] {
       rows.push(from(reported));
       continue;
     }
-    rows.push({
-      name,
-      usedPct: null,
-      headroomPct: null,
-      resetsAt: null,
-      binding: false,
-      unknownReason: known
-        ? `no ${name} window was reported for this account`
-        : (account.unknownReason ?? 'not measured'),
-    });
+    rows.push(unmeasured(name, known ? `no ${name} window was reported for this account` : reason));
   }
   for (const window of account.windows) {
     if ((HEADLINE_WINDOWS as readonly string[]).includes(window.name)) continue;

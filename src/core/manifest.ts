@@ -335,16 +335,25 @@ export function renderManifestMarkdown(manifest: Manifest): string {
       // would throw away a measurement that is right there in the file — and
       // this document's whole job is to be readable six weeks later.
       //
-      // `bindingWindow` is what makes this safe, and it is doing real work
-      // rather than being an incidental match. An unmeasured account has always
-      // been written with `bindingWindow: 'unknown'` (or `'n/a'` for an
-      // API-key slot) beside its placeholder `headroomPct: 0`, so those never
-      // equal `'5h'` or `'7d'` and never reach the conversion below. Without
-      // that guard a placeholder zero would render as a confident `100%` — the
-      // most emphatic possible way to say "we never read this".
+      // Two guards, and neither is decoration.
+      //
+      // `bindingWindow === name` is the first: an unmeasured account is written
+      // with `'unknown'` (or `'n/a'` for an API-key slot), so it does not match.
+      //
+      // The second is that a bare `headroomPct: 0` is REFUSED. In a file this
+      // old, zero is ambiguous — it is what a genuinely spent window records and
+      // it is also the placeholder an unmeasured one recorded — and nothing in
+      // the file distinguishes them. Rendering it as `100%` would be the most
+      // emphatic possible way to say "we never read this", so the ambiguous
+      // value reads as `unknown` and the spent account loses a figure it can
+      // still be read out of the JSON. Losing a true number is a smaller error
+      // than inventing one, every time. A manifest written by 0.3 or later
+      // carries `usedPct` explicitly and never reaches this branch.
       if (account.bindingWindow === name) {
         if (account.usedPct !== null) return `${account.usedPct.toFixed(0)}%`;
-        if (account.headroomPct !== null) return `${(100 - account.headroomPct).toFixed(0)}%`;
+        if (account.headroomPct !== null && account.headroomPct > 0) {
+          return `${(100 - account.headroomPct).toFixed(0)}%`;
+        }
       }
       return 'unknown';
     };

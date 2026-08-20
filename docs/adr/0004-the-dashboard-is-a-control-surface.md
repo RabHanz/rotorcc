@@ -36,6 +36,7 @@ calls. There is no second implementation of anything.**
 | `f`         | force a quota re-poll                 | `manager.readUsage({force:true})`  |
 | `w` → `c`   | checkpoint everything now             | `performCheckpoint`                |
 | `w` → `x`   | clear the raised flags                | `store.clearFlag`                  |
+| `o`         | the last action's full output         | — (reads what the action returned) |
 
 `src/tui/actions.ts` is the whole adapter: it collects the command's `out`
 lines, turns its exit code into an outcome, and hands that back to the pane.
@@ -63,12 +64,26 @@ Two switches interleaving is how a slot ends up holding another slot's login.
 
 **Anything that changes the machine confirms first, with the numbers in front
 of you.** The switch confirmation names the target's 5h AND 7d spend, because a
-slot number is not something anybody can make a decision from. Enabling an
-account is the one exception: it can only add an option, so it runs directly.
+slot number is not something anybody can make a decision from.
+
+There is no exception, and there was nearly one. Enabling an account looked
+harmless — it can only add a rotation target — so it ran directly. But `d` is a
+_toggle_, and which way it goes depends on a tag on the row; the tag was at the
+end of the row, where the width guard cut it first. An operator on an
+80-column terminal could press `d` meaning "hold this back" and silently
+re-enable it. The tag moved into the name column and the exemption went away. A
+rule with one exception is a rule with none.
 
 **`q` never quits out from under a decision.** Inside a confirmation it cancels.
 A key that means "leave" in one context and "answer the question in front of
 you" in another is how a confirmation gets defeated by muscle memory.
+
+**`q` also never quits out from under an ACTION.** `switchAccount` writes the
+live credential and then records the roster, and nothing rolls that back on
+process death — rollback runs on a thrown error. So a quit while an action is
+in flight is deferred until it finishes, with the pane saying so; asking a
+second time overrides it, because an operator who really wants out of a long
+checkpoint sweep must not be held by a pane.
 
 ### The lock
 

@@ -671,7 +671,17 @@ function accountLines(
   const pointer = options.cursor ? c.accent('❯') : ' ';
   const marker = account.active ? c.accent('▸') : ' ';
   const label = account.alias ?? account.email ?? `account ${account.number}`;
-  const name = padVisible(truncateVisible(label, 18), 18);
+  // The tags live INSIDE the name column, not at the end of the row. At the
+  // end they were the first thing the frame's width guard cut, on every common
+  // terminal width — and "[disabled]" is the one thing on this row that
+  // changes what the `d` key will do, so an operator who cannot see it can
+  // press `d` meaning "hold this back" and re-enable it instead.
+  const tags =
+    (account.disabled === true ? ' [off]' : '') + (account.kind === 'api-key' ? ' [key]' : '');
+  // The LABEL gives way, never the tag. Truncating the pair together let a long
+  // account name push `[off]` out of the column, which is the same
+  // invisibility by a shorter route.
+  const name = padVisible(`${truncateVisible(label, Math.max(4, 18 - tags.length))}${tags}`, 18);
   const number = padVisible(`#${account.number}`, 4);
   const showBar = options.width >= BAR_WIDTH_THRESHOLD;
 
@@ -681,9 +691,6 @@ function accountLines(
       : account.usageAgeMs > 120_000
         ? ` ${c.dim(`(${formatDuration(account.usageAgeMs)} old)`)}`
         : '';
-  const tags =
-    (account.disabled === true ? c.dim(' [disabled]') : '') +
-    (account.kind === 'api-key' ? c.dim(' [api-key]') : '');
 
   // BOTH windows, always, each named and each reported as spent. Collapsing to
   // the binding one is what made a 5-hour window at 99% and a week at 72% read
@@ -697,7 +704,7 @@ function accountLines(
     ? c.dim(formatBinding(account))
     : c.unknown(formatBinding(account));
 
-  const lines = [`${pointer}${marker} ${number}${name} ${headline} ${binding}${age}${tags}`];
+  const lines = [`${pointer}${marker} ${number}${name} ${headline} ${binding}${age}`];
   for (const extra of windows.slice(2)) {
     // Per-model weekly caps. A full one stops the work exactly as hard as the
     // account-wide window, so it is never dropped — only ranked below.

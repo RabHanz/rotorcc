@@ -195,6 +195,38 @@ describe('windowsUsedOf', () => {
     expect(weekly?.unknownReason).toContain('7d');
   });
 
+  it('reports every window as unknown when the account itself is unmeasured', () => {
+    // The legacy reader can hand back an account marked unreadable that still
+    // carries window entries from an earlier pass. Converting those would emit
+    // one object asserting both "never measured" and "12% used", and draw a bar
+    // beside the words "binding window unknown". `headroomIsKnown` is the ONE
+    // place this project answers "is this a measurement", and a surface that
+    // second-guesses it per window is how that rule stops being enforceable.
+    const stale: AccountReading = {
+      number: 4,
+      email: 'stale@example.com',
+      active: false,
+      headroomPct: 88,
+      headroomKnown: false,
+      unknownReason: 'quota read failed: http-429',
+      bindingWindow: '5h',
+      windows: [
+        { name: '5h', headroomPct: 88 },
+        { name: '7d', headroomPct: 40 },
+      ],
+      stale: true,
+      usageAgeMs: 900_000,
+    };
+    const rows = windowsUsedOf(stale);
+    expect(rows.map((w) => w.usedPct)).toEqual([null, null]);
+    expect(rows.every((w) => w.unknownReason === 'quota read failed: http-429')).toBe(true);
+    expect(rows.some((w) => w.binding)).toBe(false);
+    // And the same account's JSON does not contradict itself.
+    const json = accountJson(stale);
+    expect(json.usedPct).toBeNull();
+    expect(json.windows.every((w) => w.usedPct === null)).toBe(true);
+  });
+
   it('is null on BOTH windows for an unmeasured account, never 0 and never 100', () => {
     const rows = windowsUsedOf(unmeasured());
     expect(rows.map((w) => w.usedPct)).toEqual([null, null]);
@@ -498,6 +530,21 @@ describe('the dashboard', () => {
     expect(visible).toContain('cancel');
   });
 
+  it('keeps the disabled tag on screen at every width', () => {
+    // The tags used to sit at the end of the row, which made them the first
+    // thing the width guard cut. `[off]` is the one thing on this row that
+    // decides what `d` will do, so an operator who cannot see it can press `d`
+    // meaning "hold this back" and re-enable it instead.
+    const held = incidentAccount({ disabled: true, alias: 'a-long-account-name' });
+    for (const width of [80, 100, 120, 200]) {
+      const line =
+        renderDashboard(dashboard([held]), { palette: colours, width }).find((l) =>
+          l.includes('#1'),
+        ) ?? '';
+      expect(line, `width ${width}`).toContain('[off]');
+    }
+  });
+
   it('draws no cursor and no panel when there is no keyboard', () => {
     // `--once`, and anything piped, render a read-only frame. A frame going
     // into a cron mail has no cursor, and must not look like a control surface.
@@ -626,6 +673,35 @@ describe('the resume manifest', () => {
     const markdown = renderManifestMarkdown(old);
     expect(markdown).not.toContain('100%');
     expect(markdown.match(/\| unknown \| unknown \|/g)?.length).toBe(2);
+  });
+
+  it('refuses the ambiguous zero rather than resolving it either way', () => {
+    // In a pre-0.3 file, `headroomPct: 0` is what a genuinely spent window
+    // recorded AND the placeholder an unmeasured one recorded, with nothing in
+    // the file to tell them apart — even when the binding window looks real.
+    // Losing a true figure is a smaller error than inventing one. The number is
+    // still in the JSON for anyone who wants to make their own call.
+    const old = parseManifest({
+      ...(JSON.parse(JSON.stringify(manifest)) as Record<string, unknown>),
+      accounts: {
+        activeNumber: 1,
+        targetNumber: null,
+        observedAt: '2026-08-20T01:00:00Z',
+        list: [
+          {
+            number: 1,
+            label: 'zero',
+            headroomPct: 0,
+            bindingWindow: '5h',
+            resetsAt: null,
+            active: true,
+          },
+        ],
+      },
+    });
+    const markdown = renderManifestMarkdown(old);
+    expect(markdown).not.toContain('100%');
+    expect(markdown).toContain('| unknown | unknown |');
   });
 
   it('re-renders an older manifest from the one figure it does carry', () => {

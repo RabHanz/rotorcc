@@ -1,0 +1,68 @@
+{
+  "status": "reviewed",
+  "critic": "claude-blind",
+  "codexAvailable": false,
+  "round": 3,
+  "roundCap": 3,
+  "base": "work/close-cswap-gaps",
+  "head": "work/tui-interactive",
+  "note": "Third and final blind round under the standing three-round cap, run against the diff as it stood after round two's fixes, with both earlier artifacts excluded from what the critic saw. Fresh headless process, given the diff and the review contract and nothing else. Codex was NOT run; its subscription is out. Every finding below was accepted and fixed; no round was run after these fixes, so they carry the full gate and the tests named beside each one as their evidence rather than a further critic pass.",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "src/tui/app.ts",
+      "line": 313,
+      "summary": "`q`/Ctrl-C is honoured while a mutating action is still in flight, and nothing waits for it, so the process can exit part-way through a credential switch.",
+      "failure_scenario": "Confirm a switch, then press `q` before it returns. `handleKey` yields a quit intent even while busy, the loop condition knows nothing about `ui.busy`, and `runTui` returns. `switchAccount` writes the live credential and THEN records the roster, and its rollback runs on a thrown error rather than on process death, so the live credential can be slot 2's while the roster still says slot 1 — and the `finally` that releases the tick lock never runs.",
+      "disposition": "accepted, fixed",
+      "fix": "A quit while an action is in flight is deferred: the loop runs while `running || ui.busy !== null`, and the pane says `leaving as soon as \"<action>\" finishes · press q again to leave anyway`. A second request overrides it, because an operator who really wants out of a long checkpoint sweep must not be held by a pane. SIGINT and SIGTERM go through the same path rather than setting the flag directly. The blast radius was smaller than described — `detectActiveSlot` works by credential fingerprint rather than by the roster, and the capture step has already stashed the outgoing credential — but a half-finished credential transaction because somebody pressed a key is wrong regardless, and the abandoned lock is real."
+    },
+    {
+      "severity": "P1",
+      "file": "src/commands/predict.ts",
+      "line": 75,
+      "summary": "`predict` builds a prediction and a finish-first answer from the placeholder `headroomPct: 0` for accounts it could not measure, and `--json` serialises the row without the `headroomIsKnown` guard the human path applies.",
+      "failure_scenario": "An account with burn history from earlier readings becomes unreadable today. `headroomPct` is the placeholder 0, so `predictThreshold(0, …)` takes the already-at-or-below branch and returns `inMs: 0`. The text renderer skips the row; the `--json` branch above it nulls only `headroomPct`, `bindingWindow` and `usedPct` and emits the prediction fields unchanged. A cron job branching on `predict --json` reads a confident deadline of zero for the one account rotorcc has just said it cannot read.",
+      "disposition": "accepted, fixed",
+      "fix": "The guard moved to where the row is BUILT, so both renderers see the same thing: an unmeasured account gets `{at: null, inMs: null, confidence: 'none'}` and `finish.answer: null`, each with the account's own unknown reason as the detail. Pre-existing on the JSON path rather than introduced here, and on a surface this change touches, so it is fixed here."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/usage.ts",
+      "line": 203,
+      "summary": "`windowsUsedOf` converts any entry in `account.windows` into a percentage without consulting `headroomIsKnown`, so an unreadable account that still carries window entries is serialised as measured.",
+      "failure_scenario": "An account with `headroomKnown: false` and a non-empty `windows` array — the legacy reader's stale path produces exactly this — yields one JSON object asserting both `usedPct: null, unknownReason: 'quota read failed'` at the top level and `usedPct: 12` in its windows array, and a row that prints bars beside the words 'binding window unknown'.",
+      "disposition": "accepted, fixed",
+      "fix": "Every window of an account whose headline is not known now reports `unknown` with the account's reason. The original design treated per-window entries as measurements in their own right, which is defensible in isolation and wrong as a rule: `headroomIsKnown` is the single place this project answers 'is this a measurement', and a surface that second-guesses it per window is how that rule stops being enforceable. Test: a stale account with real window entries reports both windows unknown and its JSON does not contradict itself."
+    },
+    {
+      "severity": "P2",
+      "file": "src/core/manifest.ts",
+      "line": 345,
+      "summary": "The pre-0.3 manifest fallback relies on an invariant nothing writes, validates or tests, and the guarding test hand-writes the invariant into its fixture rather than exercising it.",
+      "failure_scenario": "If any reading path left `bindingWindow: '5h'` beside the placeholder `headroomPct: 0`, `cell('5h')` returns `100%` in the rescue document.",
+      "disposition": "accepted, fixed",
+      "fix": "The fallback no longer depends on the invariant. A bare `headroomPct: 0` in a pre-0.3 file is refused outright, because in a file that old zero is what a genuinely spent window recorded AND the placeholder an unmeasured one recorded, with nothing in the file to tell them apart. It renders `unknown`; the number is still in the JSON for a reader who wants to make their own call. Losing a true figure is a smaller error than inventing one. A test now covers the ambiguous case directly — `{headroomPct: 0, bindingWindow: '5h'}` renders `unknown` and `100%` appears nowhere."
+    },
+    {
+      "severity": "P2",
+      "file": "src/tui/render.ts",
+      "line": 617,
+      "summary": "The bar threshold is sized for the account row without its trailing age and tags, so `[disabled]` falls off the right edge on ordinary terminals — and `d` on an already-disabled account was the one acting key that skipped its confirmation.",
+      "failure_scenario": "The tags sit at the end of the row, past the binding trailer, so the frame's width guard cuts them first; at 80 columns they never appear. An operator who cannot see that a slot is held out presses `d` meaning 'hold this back' and silently re-enables it instead, with no confirmation to catch the mistake.",
+      "disposition": "accepted, fixed",
+      "fix": "Two changes, because either alone leaves the hazard. The tags moved INTO the name column as `[off]` / `[key]`, and the LABEL is what gives way when the column is tight — truncating the pair together let a long account name push the tag out, which the new test caught. And the confirmation exemption is gone: `d` asks in both directions, with its own prompt for the enable case. A rule with one exception is a rule with none. Test: the tag is present at 80, 100, 120 and 200 columns for a long-named account, and the enable path is a confirm."
+    },
+    {
+      "severity": "P3",
+      "file": "test/tui-actions.test.ts",
+      "line": 337,
+      "summary": "The checkpoint action test asserts only that some output exists, so it passes unchanged if the action fails outright.",
+      "failure_scenario": "It checks `lines.length > 0` and the title, never `ok` or any content. `runAction`'s catch produces one line under the same title, so a thrown `performCheckpoint` keeps the test green and the `w` → `c` key could stop checkpointing anything.",
+      "disposition": "accepted, fixed",
+      "fix": "It asserts `ok`, matches the summary line's shape, and asserts the failure text is absent. A second test pins the summary being FIRST, which is what makes a skipped tree survive the pane's four-line preview."
+    }
+  ],
+  "blocking": false,
+  "disposition": "6 findings, all accepted and all fixed with regression tests. Two of them — the deferred quit and the predict guard — are real defects the earlier rounds did not reach. Two were the third and fourth restatements of the manifest fallback: rather than defend the invariant a third time, the fallback was changed to stop depending on it. The three-round cap is reached; these fixes are evidenced by the tests named against each finding and by the full gate, not by a further critic pass. 671 tests, up from 582 on the base branch."
+}

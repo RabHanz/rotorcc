@@ -231,6 +231,7 @@ keys in "rotorcc tui" / "rotorcc watch"
   f                         force a quota re-poll, ignoring the poll floor
   r                         refresh the screen without spending a quota request
   w                         why has nothing happened — and act on it from there
+  o                         the last action's full output
   p / ? / q                 pause · keys · quit
 Every acting key runs the same code as the matching command — enter is
 "rotorcc switch", d is "rotorcc accounts disable", t is "rotorcc config set

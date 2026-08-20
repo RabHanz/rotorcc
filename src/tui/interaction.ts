@@ -182,6 +182,17 @@ function disablePrompt(target: KeyAccount): string[] {
   ];
 }
 
+function enablePrompt(target: KeyAccount): string[] {
+  return [
+    `Put slot ${target.slot} (${target.label}) back into automatic rotation?`,
+    '',
+    `  spend now   ${target.windows}`,
+    '',
+    'It is currently held out. rotorcc will consider it as a rotation target',
+    'again from the next decision.',
+  ];
+}
+
 function checkpointPrompt(): string[] {
   return [
     'Commit and push every watched worktree now?',
@@ -459,17 +470,12 @@ function route(
   }
 
   if (key === 'd') {
-    if (target.disabled) {
-      // Putting an account BACK into rotation adds an option; it cannot strand
-      // the machine, so it runs without a confirmation.
-      const action: PendingAction = {
-        kind: 'set-disabled',
-        slot: target.slot,
-        disabled: false,
-        label: `enable slot ${target.slot} (${target.label})`,
-      };
-      return { state: { ...base, busy: action.label }, intent: { kind: 'run', action } };
-    }
+    // BOTH directions ask. Enabling was exempt on the grounds that it can only
+    // add an option — true in itself, and the wrong rule: `d` is a toggle whose
+    // effect depends on a state the operator has to be able to see, so an
+    // exemption on one side turns a misread row into a silent change. A rule
+    // with one exception is a rule with none.
+    const disabling = !target.disabled;
     return {
       state: {
         ...base,
@@ -478,10 +484,10 @@ function route(
           action: {
             kind: 'set-disabled',
             slot: target.slot,
-            disabled: true,
-            label: `disable slot ${target.slot} (${target.label})`,
+            disabled: disabling,
+            label: `${disabling ? 'disable' : 'enable'} slot ${target.slot} (${target.label})`,
           },
-          prompt: disablePrompt(target),
+          prompt: disabling ? disablePrompt(target) : enablePrompt(target),
         },
       },
       intent: NOTHING,

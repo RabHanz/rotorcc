@@ -195,6 +195,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const gatherMs = options.gatherMs ?? 15_000;
 
   let running = true;
+  let quitRequests = 0;
   let gathering = false;
   let forceNext = options.force ?? false;
   let config = options.config;
@@ -203,6 +204,28 @@ export async function runTui(options: TuiOptions): Promise<number> {
   let model = await buildDashboardModel({ ...options, force: forceNext });
   previousWorkload = model.workload;
   forceNext = false;
+
+  /**
+   * Leaving, once whatever is running has finished.
+   *
+   * The loop below keeps going while an action is in flight, so this only sets
+   * the intent. The note is what the operator sees in the meantime: a pane that
+   * appears to ignore `q` is a pane somebody kills from another terminal, which
+   * is the same mid-switch exit by a different route.
+   */
+  const requestQuit = (): void => {
+    quitRequests += 1;
+    running = false;
+    if (ui.busy !== null) {
+      ui = {
+        ...ui,
+        note:
+          quitRequests >= 2
+            ? `leaving NOW — "${ui.busy}" was not finished`
+            : `leaving as soon as "${ui.busy}" finishes · press q again to leave anyway`,
+      };
+    }
+  };
 
   const colours = palette(options.theme ?? 'auto', { isTTY: true });
 
@@ -317,7 +340,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       ui = result.state;
       switch (result.intent.kind) {
         case 'quit':
-          running = false;
+          requestQuit();
           break;
         case 'gather':
           void gather({ ignorePause: true, force: result.intent.force });
@@ -350,26 +373,31 @@ export async function runTui(options: TuiOptions): Promise<number> {
 
   const redrawTimer = setInterval(draw, redrawMs);
   const gatherTimer = setInterval(() => void gather(), gatherMs);
-  const onSignal = (): void => {
-    running = false;
-  };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', requestQuit);
+  process.on('SIGTERM', requestQuit);
 
   draw();
 
   try {
     // Poll for the quit flag rather than racing promises: one place decides
     // the loop is over, and the cleanup below always runs.
-    while (running) {
+    //
+    // An action in flight holds the loop open. `switchAccount` writes the live
+    // credential and then records the roster; a process that exits between
+    // those two leaves the machine in a state nothing rolls back, because
+    // rollback runs on a thrown error and not on death. So `q` during an action
+    // means "leave when this finishes", and says so on screen. Asking twice
+    // overrides it — an operator who really wants out of a long checkpoint
+    // sweep must not be held by a pane.
+    while (running || (ui.busy !== null && quitRequests < 2)) {
       await new Promise((resolve) => setTimeout(resolve, 80));
     }
   } finally {
     clearInterval(redrawTimer);
     clearInterval(gatherTimer);
     stdout.off('resize', onResize);
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    process.off('SIGINT', requestQuit);
+    process.off('SIGTERM', requestQuit);
     if (stdin.isTTY === true) stdin.pause();
     restore();
   }

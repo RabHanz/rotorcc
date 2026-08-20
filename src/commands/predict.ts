@@ -17,6 +17,7 @@ import type { Config } from '../config/schema.js';
 import type { AccountManager } from '../accounts/manager.js';
 import {
   type BurnRate,
+  type Prediction,
   BurnStore,
   burnRateFrom,
   formatDuration,
@@ -55,13 +56,28 @@ export async function runPredict(options: PredictOptions): Promise<number> {
 
   const rows = reading.accounts.map((account) => {
     const rate = burnRateFrom(burn.series(account.number));
-    const prediction = predictThreshold(
-      account.headroomPct,
-      rate,
-      config.thresholds.rotatePct,
-      Date.now(),
-      account.bindingWindow,
-    );
+    // An account rotorcc could not measure gets NO projection, however much
+    // burn history it has from before. `headroomPct` is a placeholder zero for
+    // such an account, and feeding it in produces the most confident possible
+    // output — `already at or below 5% headroom`, `inMs: 0` — about the one
+    // account rotorcc has just admitted it cannot read. The text surface
+    // skipped those rows; `--json` did not, and a cron job branching on it
+    // would have read a fabricated deadline.
+    const measured = headroomIsKnown(account);
+    const prediction: Prediction = measured
+      ? predictThreshold(
+          account.headroomPct,
+          rate,
+          config.thresholds.rotatePct,
+          Date.now(),
+          account.bindingWindow,
+        )
+      : {
+          at: null,
+          inMs: null,
+          confidence: 'none',
+          detail: `headroom is unknown — ${account.unknownReason ?? 'not measured'}`,
+        };
     const requirement =
       workload === null
         ? {
@@ -72,12 +88,17 @@ export async function runPredict(options: PredictOptions): Promise<number> {
         : estimateHeadroomNeeded(workload, rate.pctPerHour, {
             minimumPct: config.minTargetHeadroomPct,
           });
-    const finish = willFinishFirst(
-      prediction,
-      requirement.estimatedPct,
-      account.headroomPct,
-      account.bindingWindow,
-    );
+    const finish = measured
+      ? willFinishFirst(
+          prediction,
+          requirement.estimatedPct,
+          account.headroomPct,
+          account.bindingWindow,
+        )
+      : {
+          answer: null,
+          detail: `cannot say: headroom is unknown — ${account.unknownReason ?? 'not measured'}`,
+        };
     return { account, rate, prediction, requirement, finish };
   });
 

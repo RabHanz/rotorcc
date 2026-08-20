@@ -58,6 +58,7 @@ cannot see the most attractive rotation target on the screen.
 | `t`            | change the rotation strategy                           |
 | `f`            | force a quota re-poll, ignoring the poll floor         |
 | `w`            | why has nothing happened — and act on it from there    |
+| `o`            | the last action's full output                          |
 | `?`            | the keys                                               |
 
 **Every acting key runs the same code as the matching CLI verb** — `enter` is
@@ -68,9 +69,12 @@ one nobody tests is the one that runs at three in the morning. See
 [ADR 0004](docs/adr/0004-the-dashboard-is-a-control-surface.md).
 
 Each action asks first, with the target's spend on **both** windows in the
-question; only one runs at a time; each takes rotorcc's own tick lock so it
-cannot race the every-minute watcher; and the result is shown in the pane, with
-a failure taking over the screen rather than scrolling past.
+question; only one runs at a time, by whatever route the key arrived; each takes
+rotorcc's own tick lock so it cannot race the every-minute watcher, and waits
+for a lock a live watcher holds rather than breaking it; and the result is shown
+in the pane, with a failure taking over the screen rather than scrolling past.
+`q` during an action leaves once it finishes rather than exiting part-way
+through a credential switch.
 
 The `w` panel shows the last decision that did not act, what `selectTarget` says
 about every account right now — computed by the same function the watcher calls,

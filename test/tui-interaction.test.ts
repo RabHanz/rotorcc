@@ -168,9 +168,24 @@ describe('disabling and enabling', () => {
     expect(state.overlay.prompt.join('\n')).toContain('5h 99% used');
   });
 
-  it('puts one back without asking, because that can only add an option', () => {
+  it('asks in BOTH directions, because d is a toggle over a state you must be able to see', () => {
+    // Enabling was exempt on the grounds that it can only add an option. True
+    // in itself, and the wrong rule: whether `d` disables or enables depends on
+    // a tag on the row, and that tag used to be the first thing a narrow
+    // terminal truncated. An exemption on one side turns a misread row into a
+    // silent change.
     const { intents, state } = press([DOWN, DOWN, 'd']);
-    expect(intents[2]).toMatchObject({
+    expect(intents[2]?.kind).toBe('none');
+    expect(state.busy).toBeNull();
+    expect(state.overlay.kind).toBe('confirm');
+    if (state.overlay.kind !== 'confirm') return;
+    expect(state.overlay.action).toMatchObject({ kind: 'set-disabled', slot: 3, disabled: false });
+    expect(state.overlay.prompt.join('\n')).toContain('back into automatic rotation');
+  });
+
+  it('runs the enable once confirmed', () => {
+    const { intents, state } = press([DOWN, DOWN, 'd', 'y']);
+    expect(intents[3]).toMatchObject({
       kind: 'run',
       action: { kind: 'set-disabled', slot: 3, disabled: false },
     });
