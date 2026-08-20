@@ -14,15 +14,43 @@
  *   - **never act on a stale reading, and never publish a tip that is not a
  *     descendant of what it would overwrite.** See below.
  *
- * ## The 2026-08-19 data-loss defect
+ * ## The 2026-08-19 data-loss defects
  *
- * The sweep committed a stale worktree over newer work on one branch three
- * times in forty minutes, and pushed each time. The shape was a loop rather
- * than a one-off race: committing advanced the branch, advancing the branch
- * re-dirtied the stale tree, and the next sweep committed it again. The branch
- * survived only because a human's push happened to land last.
+ * Three incidents in one night, and they share a root cause worth stating
+ * plainly: **`git add -A && git commit` on somebody else's working tree, at a
+ * moment nobody chose, is not a checkpoint. It is an edit.**
  *
- * Two structural guards now make that impossible rather than unlikely:
+ * 1. The sweep committed a stale worktree over newer work on one branch three
+ *    times in forty minutes and pushed each time. A loop rather than a race:
+ *    committing advanced the branch, advancing the branch re-dirtied the stale
+ *    tree, and the next sweep committed it again.
+ * 2. It silently reverted another branch, wiping a review artifact, a test file
+ *    and four fixes.
+ * 3. It committed an agent's IN-FLIGHT source changes across three packages
+ *    while the matching tests were still unstaged, and pushed that as the
+ *    branch tip. The result was a commit that is half a change: the branch went
+ *    red, with no explanation attached to it, and the agent who owned the
+ *    branch had not written it and did not know it existed.
+ *
+ * Nothing was ultimately lost, but only because people noticed. That is not a
+ * safety property.
+ *
+ * ### The rule that came out of it
+ *
+ * **A checkpoint is recoverable, not authoritative.** It never becomes the tip
+ * of a shared branch, and it is never pushed. `checkpointTree` builds a commit
+ * object from the working tree with `git stash create` — which writes to the
+ * object database and touches neither the branch, the index, nor the files —
+ * and records it under `refs/rotorcc/checkpoints/<branch>`. The work is safe
+ * and recoverable with one command; the branch is exactly where the agent left
+ * it; a partial edit cannot become a tip; CI never sees it; and there is no
+ * commit for a later sweep to build a stale tree on top of.
+ *
+ * Pushing is now only ever about commits the AGENT made — a branch genuinely
+ * ahead of its remote — and never about anything rotorcc wrote.
+ *
+ * Two further guards, kept because they are cheap and they catch different
+ * things:
  *
  *   1. **A plan is void if the tree moved under it.** `inspectTree` records the
  *      exact HEAD it read. `checkpointTree` re-reads HEAD immediately before
@@ -43,7 +71,8 @@
  * Neither guard costs anything when things are normal: one `rev-parse` and one
  * `merge-base --is-ancestor` per tree.
  */
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 
 import type { ProjectConfig } from '../config/schema.js';
@@ -80,7 +109,17 @@ export interface TreeStatus {
 export interface CheckpointOutcome {
   tree: string;
   branch: string;
+  /**
+   * True when this sweep saved uncommitted work.
+   *
+   * It no longer means "made a commit on the branch" — the branch is never
+   * moved. It means a commit object was written and `checkpointRef` points at
+   * it. The field keeps its name because every surface that renders it means
+   * the same thing by it: "your dirty files are safe".
+   */
   committed: boolean;
+  /** The ref the work was saved under, when any was. Never a branch. */
+  checkpointRef?: string | null;
   pushed: boolean;
   skipped: string | null;
   error: string | null;
@@ -175,8 +214,18 @@ export interface GitContext {
   timeoutMs?: number;
 }
 
-async function git(ctx: GitContext, cwd: string, args: string[]): Promise<RunResult> {
-  return run([...ctx.git, ...args], { cwd, timeoutMs: ctx.timeoutMs ?? 60_000, okCodes: [1] });
+async function git(
+  ctx: GitContext,
+  cwd: string,
+  args: string[],
+  env?: NodeJS.ProcessEnv,
+): Promise<RunResult> {
+  return run([...ctx.git, ...args], {
+    cwd,
+    timeoutMs: ctx.timeoutMs ?? 60_000,
+    okCodes: [1],
+    ...(env === undefined ? {} : { env }),
+  });
 }
 
 /** `origin` when it exists, otherwise the first remote, otherwise null. */
@@ -405,6 +454,7 @@ export async function checkpointTree(
   }
 
   let committed = false;
+  let checkpointRef: string | null = null;
   const commitDirty = options.commitDirty ?? true;
   if (tree.dirtyFiles > 0 && !commitDirty) {
     // Routine trigger: leave the agent's uncommitted edits alone and only push
@@ -417,24 +467,28 @@ export async function checkpointTree(
     }
   } else if (tree.dirtyFiles > 0) {
     if (options.dryRun) {
-      return { ...base, skipped: `dry run: would commit ${tree.dirtyFiles} file(s) and push` };
+      return {
+        ...base,
+        skipped: `dry run: would checkpoint ${tree.dirtyFiles} file(s) to a rotorcc ref`,
+      };
     }
-    const add = await git(ctx, tree.path, ['add', '-A']);
-    if (add.code !== 0) return { ...base, error: `git add failed: ${add.stderr.trim()}` };
-    const commit = await git(ctx, tree.path, ['commit', '-m', checkpointMessage(options)]);
-    const output = `${commit.stdout}${commit.stderr}`;
-    if (commit.code !== 0 && !/nothing to commit/i.test(output)) {
-      return { ...base, error: `git commit failed: ${output.trim()}` };
-    }
-    committed = commit.code === 0;
+    const saved = await saveCheckpoint(ctx, tree, options);
+    if (saved.error !== null) return { ...base, error: saved.error };
+    checkpointRef = saved.ref;
+    committed = saved.ref !== null;
   }
 
-  const needsPush = committed || tree.ahead === null || (tree.ahead ?? 0) > 0;
-  if (!needsPush) return { ...base, committed };
+  // A checkpoint ref is never pushed, so it is not a reason to push. The only
+  // reason left is the one that was always legitimate: the agent has commits
+  // the remote does not.
+  const needsPush = tree.ahead === null || (tree.ahead ?? 0) > 0;
+  if (!needsPush) return { ...base, committed, checkpointRef };
   if (!tree.hasRemote || tree.remote === null) {
-    return { ...base, committed, skipped: 'no remote configured' };
+    return { ...base, committed, checkpointRef, skipped: 'no remote configured' };
   }
-  if (options.dryRun) return { ...base, committed, skipped: 'dry run: would push' };
+  if (options.dryRun) {
+    return { ...base, committed, checkpointRef, skipped: 'dry run: would push' };
+  }
 
   // The descendant invariant. rotorcc publishes a tip only when the tip the
   // remote already has is an ANCESTOR of it — that is what "this push adds
@@ -471,22 +525,128 @@ export async function checkpointTree(
       return {
         ...base,
         committed,
+        checkpointRef,
         skipped:
           `not pushed: ${compareAgainst} is not an ancestor of this branch's tip` +
           (tree.behind === null || tree.behind === 0 ? '' : ` (${tree.behind} commit(s) behind)`) +
           '. Pushing would publish a history that drops work already on the remote. ' +
-          'Anything dirty was committed locally and is safe; reconcile this by hand.',
+          `Anything dirty was saved to ${checkpointRef ?? 'a rotorcc checkpoint ref'} and is ` +
+          'recoverable; reconcile this by hand.',
       };
     }
   }
 
   // `-u` sets an upstream on a branch that has none. No force, no lease, no
-  // exceptions: rotorcc only ever fast-forwards commits it just made itself.
+  // exceptions — and nothing rotorcc wrote is in what goes up: the only commits
+  // being published are the agent's own, which is what `ahead` counts.
   const push = await git(ctx, tree.path, ['push', '-u', tree.remote, tree.branch]);
   if (push.code !== 0) {
-    return { ...base, committed, error: `git push failed: ${(push.stderr || push.stdout).trim()}` };
+    return {
+      ...base,
+      committed,
+      checkpointRef,
+      error: `git push failed: ${(push.stderr || push.stdout).trim()}`,
+    };
   }
-  return { ...base, committed, pushed: true };
+  return { ...base, committed, checkpointRef, pushed: true };
+}
+
+/**
+ * Save the working tree to a rotorcc-owned ref, touching nothing else.
+ *
+ * Built with plumbing and a **temporary index**, which is what makes it safe:
+ *
+ *   GIT_INDEX_FILE=<temp> git read-tree HEAD     start from the current commit
+ *   GIT_INDEX_FILE=<temp> git add -A             stage the working tree
+ *   GIT_INDEX_FILE=<temp> git write-tree         -> a tree object
+ *   git commit-tree <tree> -p HEAD -m <message>  -> a commit object
+ *   git update-ref refs/rotorcc/checkpoints/…    -> reachable, so it survives gc
+ *
+ * The agent's real index is never opened, no file on disk is written, and the
+ * branch is not moved. An agent that is mid-edit keeps its edits exactly as
+ * they are — staged, unstaged and untracked alike — and rotorcc gets a durable,
+ * addressable copy of all of it.
+ *
+ * `git stash create` was the obvious choice and is the wrong one: it does not
+ * include UNTRACKED files, which for an agent writing a new module is most of
+ * the work. A checkpoint that quietly omits every new file is worse than none,
+ * because it looks like it worked.
+ *
+ * The ref lives outside `refs/heads` and `refs/remotes` on purpose. It is not a
+ * branch, it does not appear in `git branch`, it is never pushed, and CI never
+ * sees it. The previous design committed onto the branch and pushed; on
+ * 2026-08-19 that published an agent's half-finished change — source without
+ * its tests — as a branch tip, and the branch went red with no explanation and
+ * no author.
+ */
+async function saveCheckpoint(
+  ctx: GitContext,
+  tree: TreeStatus,
+  options: CheckpointOptions,
+): Promise<{ ref: string | null; error: string | null }> {
+  const indexFile = join(
+    tmpdir(),
+    `rotorcc-index-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  const env = { ...process.env, GIT_INDEX_FILE: indexFile };
+  const message = checkpointMessage(options);
+
+  try {
+    if (tree.headSha !== null) {
+      const read = await git(ctx, tree.path, ['read-tree', tree.headSha], env);
+      if (read.code !== 0) {
+        return { ref: null, error: `git read-tree failed: ${read.stderr.trim()}` };
+      }
+    }
+
+    const staged = await git(ctx, tree.path, ['add', '-A'], env);
+    if (staged.code !== 0) {
+      return { ref: null, error: `git add failed: ${staged.stderr.trim()}` };
+    }
+
+    const written = await git(ctx, tree.path, ['write-tree'], env);
+    const treeSha = written.stdout.trim();
+    if (written.code !== 0 || treeSha === '') {
+      return { ref: null, error: `git write-tree failed: ${written.stderr.trim()}` };
+    }
+
+    // Nothing changed after all: the tree went clean between the reading and
+    // now. A legitimate outcome, and not an error.
+    if (tree.headSha !== null) {
+      const headTree = await git(ctx, tree.path, ['rev-parse', `${tree.headSha}^{tree}`]);
+      if (headTree.code === 0 && headTree.stdout.trim() === treeSha) {
+        return { ref: null, error: null };
+      }
+    }
+
+    const commitArgs = ['commit-tree', treeSha, '-m', message];
+    // A repository whose first commit has not happened has no parent to name,
+    // and still holds real work.
+    if (tree.headSha !== null) commitArgs.push('-p', tree.headSha);
+    const committed = await git(ctx, tree.path, commitArgs);
+    const commitSha = committed.stdout.trim();
+    if (committed.code !== 0 || commitSha === '') {
+      return { ref: null, error: `git commit-tree failed: ${committed.stderr.trim()}` };
+    }
+
+    const ref = checkpointRefFor(tree.branch);
+    const updated = await git(ctx, tree.path, ['update-ref', '-m', message, ref, commitSha]);
+    if (updated.code !== 0) {
+      return { ref: null, error: `git update-ref ${ref} failed: ${updated.stderr.trim()}` };
+    }
+    return { ref, error: null };
+  } finally {
+    try {
+      if (existsSync(indexFile)) unlinkSync(indexFile);
+    } catch {
+      /* a temp index left behind costs a few kilobytes and nothing else */
+    }
+  }
+}
+
+/** Where a branch's checkpoints live. Never under refs/heads or refs/remotes. */
+export function checkpointRefFor(branch: string): string {
+  return `refs/rotorcc/checkpoints/${branch}`;
 }
 
 export async function checkpointProject(

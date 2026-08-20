@@ -397,7 +397,27 @@ async function main(): Promise<number> {
         dryRun: ctx.dryRun,
       };
       if (flags.once === true) {
-        const result = await tick(tickCtx);
+        // The tick's own throws become exit 3, not node's default 1.
+        //
+        // The installed scheduler unit treats 1 and 2 as success, because both
+        // mean the watcher did its job. That makes node's own exit-1 crash
+        // indistinguishable from a healthy tick — so everything this process
+        // can catch is reported as the error it is, and only a failure before
+        // `main` runs is left ambiguous.
+        let result;
+        try {
+          result = await tick(tickCtx);
+        } catch (err) {
+          ctx.logger.error('tick threw', { detail: String(err).slice(0, 400) });
+          const detail = err instanceof Error ? err.message : String(err);
+          if (flags.json === true) {
+            out(JSON.stringify({ ok: false, detail, exitCode: 3 }, null, 2));
+          } else {
+            out(`tick failed: ${detail}`);
+            out('exit 3: error');
+          }
+          return 3;
+        }
         const code = exitCodeFor(result);
         // The code is in the JSON too. A caller that already parses the output
         // should not have to re-derive the one number it is going to branch on,
@@ -699,6 +719,17 @@ async function main(): Promise<number> {
 
     case 'upgrade': {
       const ctx = contextFor(flags);
+      if (flags.repo !== undefined) {
+        // It used to be wired through and it bypassed every identity check.
+        // Removing the wiring silently would leave a script written against
+        // the old build believing it upgraded a checkout it named, while this
+        // ran against whatever happened to be installed. A removed flag is a
+        // refusal, not a no-op.
+        out('--repo is no longer accepted: it skipped the checks that stop this command');
+        out('fast-forwarding and rebuilding inside an unrelated project.');
+        out('Run "rotorcc upgrade" from the installation you want to update.');
+        return 2;
+      }
       const result = await runUpgrade({
         binaryPath: resolveBinary(),
         check: flags.check === true,

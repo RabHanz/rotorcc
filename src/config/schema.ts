@@ -276,13 +276,23 @@ export const configSchema = z.object({
        * a hot swap before calling it good. Zero disables the watch, which also
        * disables `auto`'s ability to detect a failed swap.
        *
-       * Capped at two minutes on purpose. The watch runs inside the tick, which
-       * holds rotorcc's lock — so a generous-looking 600 here would make every
-       * hook-driven checkpoint and every later tick decline for ten minutes,
-       * and `rotorcc upgrade` refuse. The cap is below the default one-minute
-       * tick cadence's own tolerance rather than at some round number.
+       * CLAMPED to two minutes, not rejected above it. The watch runs inside
+       * the tick, which holds rotorcc's lock, so a generous-looking 600 would
+       * make every hook-driven checkpoint and every later tick decline for ten
+       * minutes and `rotorcc upgrade` refuse.
+       *
+       * Clamped rather than validated because a bound introduced in an upgrade
+       * must not turn a config that worked yesterday into one that will not
+       * parse: every command loads the config, so the scheduled tick would then
+       * die every minute — and the reason it died would be a validation error
+       * about a field nobody had touched.
        */
-      hotswapVerifySeconds: z.number().int().nonnegative().max(120).default(20),
+      hotswapVerifySeconds: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(20)
+        .transform((value) => Math.min(value, 120)),
     })
     .default({}),
 

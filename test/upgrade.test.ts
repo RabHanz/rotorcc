@@ -294,6 +294,47 @@ describe('publishStagedBuild', () => {
     if (!result.ok) expect(result.restored).toBe(false);
   });
 
+  it('rescues a retired build left by a killed run, and never deletes it on the way', () => {
+    const { root } = fixture();
+    // The fingerprint of a run killed between the two renames: the only build
+    // on the machine is in the retired directory and there is no dist.
+    renameSync(join(root, 'dist'), join(root, RETIRED_DIR));
+    mkdirSync(join(root, STAGING_DIR), { recursive: true });
+    writeFileSync(join(root, STAGING_DIR, 'cli.js'), '// new build\n');
+
+    const result = publishStagedBuild(root);
+    expect(result.ok).toBe(true);
+    expect(readFileSync(join(root, 'dist', 'cli.js'), 'utf8')).toContain('new build');
+  });
+
+  it('refuses, without deleting anything, when the retired build cannot be moved back', () => {
+    const { root } = fixture();
+    renameSync(join(root, 'dist'), join(root, RETIRED_DIR));
+    mkdirSync(join(root, STAGING_DIR), { recursive: true });
+
+    let removed = 0;
+    const result = publishStagedBuild(root, {
+      exists: existsSync,
+      rm: ((path: string, opts: object) => {
+        removed += 1;
+        rmSync(path, opts as never);
+      }) as typeof rmSync,
+      rename: (() => {
+        throw new Error('EACCES: simulated');
+      }) as typeof renameSync,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.restored).toBe(false);
+      expect(result.error).toContain(RETIRED_DIR);
+    }
+    // The last working build is STILL THERE. Cleaning up after a failed rescue
+    // would delete it and then advise `mv` on a directory this run removed.
+    expect(existsSync(join(root, RETIRED_DIR, 'cli.js'))).toBe(true);
+    expect(removed).toBe(0);
+  });
+
   it('works when there is no dist to replace', () => {
     const { root } = fixture();
     rmSync(join(root, 'dist'), { recursive: true, force: true });
@@ -585,7 +626,7 @@ describe('runUpgrade — checkout mode', () => {
     expect(report.notes.join(' ')).toContain('esbuild@0.21.5');
   });
 
-  it('fails when the new build is in place but doctor is not green', async () => {
+  it('says the machine IS on the new build when doctor fails after the swap', async () => {
     const { root, state } = fixture();
     const staged = join(root, STAGING_DIR);
     const { exec } = execFrom([
@@ -608,9 +649,21 @@ describe('runUpgrade — checkout mode', () => {
       ],
     ]);
 
-    const { code, report } = await runUpgrade(baseOptions(root, state, { exec }) as never);
-    expect(code).toBe(UPGRADE_AVAILABLE_OR_FAILED);
+    const lines: string[] = [];
+    const { code, report } = await runUpgrade(
+      baseOptions(root, state, { exec, out: (l: string) => lines.push(l) }) as never,
+    );
+
+    // The failing check is reported, and `ok` records it…
+    expect(report.ok).toBe(false);
     expect(stepDetail(report, 'doctor')).toContain('accounts');
+    // …but exit 1 is documented as "refused or failed; nothing applied", which
+    // is a claim about the machine and a false one: the swap succeeded and this
+    // box is on the new build. A CI step branching on 1 would roll back an
+    // upgrade that happened.
+    expect(report.applied).toBe(true);
+    expect(code).toBe(UPGRADE_OK);
+    expect(lines.join('\n')).toContain('This machine IS on the new build');
   });
 
   it('refuses when the rotorcc on PATH is a different installation', async () => {

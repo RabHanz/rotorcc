@@ -265,20 +265,36 @@ async function watchForAuthFailure(
   // authentication failure the session ever printed is re-found, and a working
   // swap is reported as broken — which in `auto` mode replaces a live, healthy
   // session. An offset cannot slide.
-  const start = await fileSize(path);
+  // The offset advances after every poll, so each pass reads only the bytes
+  // that arrived since the last one. A fixed offset would re-read and re-decode
+  // the whole post-swap region up to sixty times in one watch, and — worse —
+  // any cap on that read would be measured from the swap, so a chatty session
+  // would push everything it said later outside the scanned region entirely.
+  let offset = await fileSize(path);
   let madeProgress = false;
+  let blind = false;
 
   for (;;) {
     await sleep(POLL_MS);
     const size = await fileSize(path);
-    if (size > start) madeProgress = true;
-    // A transcript that SHRANK was rotated or truncated under us. There is no
-    // longer any way to tell which bytes are new, so scan nothing rather than
-    // scan everything and report a failure that may predate the swap.
-    const fresh = size >= start ? await readFrom(path, start) : '';
+
+    if (size < offset) {
+      // The transcript was rotated, compacted or replaced. The old offset means
+      // nothing in the new file, so re-baseline to the start of it: from here
+      // the watch reads the new file honestly instead of skipping its first
+      // `offset` bytes forever. The gap is recorded, because a watch that lost
+      // sight of the session is not the same thing as a clean one.
+      blind = true;
+      offset = 0;
+    }
+
+    const fresh = await readFrom(path, offset);
+    if (fresh !== '') madeProgress = true;
+    offset = size;
+
     const hit = AUTH_FAILURE_SIGNATURES.find((signature) => fresh.includes(signature));
     if (hit !== undefined) return { authFailure: hit, madeProgress: true };
-    if (clock() >= deadline) return { authFailure: null, madeProgress };
+    if (clock() >= deadline) return { authFailure: null, madeProgress: madeProgress && !blind };
   }
 }
 
@@ -291,11 +307,13 @@ async function fileSize(path: string): Promise<number> {
 }
 
 /**
- * Everything written to `path` from `offset` onward, capped.
+ * Everything written to `path` from `offset` onward, capped at the NEWEST bytes.
  *
- * The cap is a guard, not a window: a session that produced megabytes during
- * the watch is not a session whose bytes all need scanning, and reading an
- * unbounded amount inside a watcher tick is its own defect.
+ * The cap has to be anchored to the end of the file, not to `offset`. Anchoring
+ * it to the offset means a session that wrote more than the cap in one interval
+ * has everything it said afterwards fall outside the scanned region — including
+ * the authentication failure that would arrive last. Reading the newest bytes
+ * bounds the cost the same way and keeps the part that matters.
  */
 async function readFrom(path: string, offset: number, limit = 4 * 1024 * 1024): Promise<string> {
   let handle;
@@ -306,10 +324,12 @@ async function readFrom(path: string, offset: number, limit = 4 * 1024 * 1024): 
   }
   try {
     const size = (await handle.stat()).size;
-    const length = Math.min(Math.max(0, size - offset), limit);
-    if (length === 0) return '';
+    const available = Math.max(0, size - offset);
+    if (available === 0) return '';
+    const length = Math.min(available, limit);
+    const from = size - length;
     const buffer = Buffer.alloc(length);
-    await handle.read(buffer, 0, length, offset);
+    await handle.read(buffer, 0, length, from);
     return buffer.toString('utf8');
   } catch {
     return '';

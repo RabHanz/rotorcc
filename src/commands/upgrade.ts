@@ -406,20 +406,35 @@ export function publishStagedBuild(
 
   // A leftover retired directory with NO dist beside it is the fingerprint of a
   // previous run killed between the two renames: that directory is then the
-  // only build on the machine. Deleting it — which is what unconditional
-  // cleanup did — destroys the last working copy before this run has proved it
-  // can produce another. Put it back first and let the swap proceed normally.
+  // ONLY build on the machine. Put it back before doing anything else.
+  //
+  // And if putting it back fails, stop — do not clean up, do not proceed. The
+  // cleanup below is unconditional, so a failed rescue followed by a `rm` would
+  // delete the last working build in the exact case this block exists to
+  // rescue, and then tell the operator to `mv` a directory this run had just
+  // removed. The rescue and the cleanup have to be ordered against each other,
+  // not merely written near each other.
   if (fs.exists(retired) && !fs.exists(dist)) {
     try {
       fs.rename(retired, dist);
-    } catch {
-      /* it stays where it is; the message below will name it */
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          `${(err as Error).message.slice(0, 160)} — a previous upgrade left the only build in ` +
+          `${retired} and it could not be moved back. It is still there. Restore it by hand: ` +
+          `mv ${retired} ${dist}`,
+        restored: false,
+      };
     }
   }
-  try {
-    fs.rm(retired, { recursive: true, force: true });
-  } catch {
-    /* a leftover we could not clear is not a reason to refuse the upgrade */
+  // Only now, with a dist in place, is the retired copy genuinely redundant.
+  if (fs.exists(dist)) {
+    try {
+      fs.rm(retired, { recursive: true, force: true });
+    } catch {
+      /* a leftover we could not clear is not a reason to refuse the upgrade */
+    }
   }
 
   const started = Date.now();
@@ -974,7 +989,16 @@ async function upgradeCheckout(
   report.after.commit = afterCommit.ok ? afterCommit.stdout.trim() : null;
   await appendDoctor(ctx, options, report, [nodePath, join(ctx.root, 'dist', 'cli.js')]);
 
-  return finish(options, report, report.ok ? UPGRADE_OK : UPGRADE_AVAILABLE_OR_FAILED);
+  // The exit code has to agree with the text beside it. `1` is documented as
+  // "refused or failed; nothing applied" — a claim about the machine, and a
+  // false one once the new build is in place. A check failing AFTER the swap is
+  // a machine that was upgraded and now needs attention, which is exit 0 with
+  // the failures printed, not a rollback signal for whatever ran this.
+  return finish(
+    options,
+    report,
+    report.ok || report.applied ? UPGRADE_OK : UPGRADE_AVAILABLE_OR_FAILED,
+  );
 }
 
 /**

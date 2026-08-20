@@ -288,8 +288,16 @@ describe('end to end', () => {
     expect(result.detail).toContain('weekly window is healthy');
 
     const worktree = join(repo, '.claude', 'worktrees', 'agent-1');
-    expect(git(worktree, 'status', '--porcelain').trim()).toBe('');
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+    // The agent's files are left exactly as they are, and the work is saved to
+    // a rotorcc ref rather than committed onto the branch and pushed. Doing the
+    // latter published a half-finished change as a branch tip on 2026-08-19.
+    expect(git(worktree, 'status', '--porcelain').trim()).not.toBe('');
+    expect(git(worktree, 'rev-parse', 'refs/rotorcc/checkpoints/work/agent-1').trim()).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).not.toContain(
+      'auto-checkpoint',
+    );
 
     // Nothing was queued and nothing was switched.
     expect(new PendingSwitchStore(store.dir).peek()).toBeNull();
@@ -321,7 +329,14 @@ describe('end to end', () => {
 
     // And the work is safe in the meantime, because this session keeps running
     // on an account that is nearly out.
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+    // Saved to a rotorcc ref; the branch tip is still the agent's own work.
+    const agentTree = join(repo, '.claude', 'worktrees', 'agent-1');
+    expect(git(agentTree, 'rev-parse', 'refs/rotorcc/checkpoints/work/agent-1').trim()).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).not.toContain(
+      'auto-checkpoint',
+    );
   });
 
   it('picks the account with the most WEEKLY headroom, not the most 5-hour', async () => {
@@ -363,7 +378,14 @@ describe('end to end', () => {
     // A manifest is still written and the work is still pushed: stopping is not
     // the same as giving up on durability.
     expect(store.latestManifest()).not.toBeNull();
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+    // Saved to a rotorcc ref; the branch tip is still the agent's own work.
+    const agentTree = join(repo, '.claude', 'worktrees', 'agent-1');
+    expect(git(agentTree, 'rev-parse', 'refs/rotorcc/checkpoints/work/agent-1').trim()).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).not.toContain(
+      'auto-checkpoint',
+    );
   });
 
   it('the stop notice names every account, its headroom and its reset time', () => {
@@ -710,7 +732,14 @@ describe('end to end', () => {
     expect(new PendingSwitchStore(store.dir).peek()).toBeNull();
 
     // The work is still safe, which is the part that actually matters.
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).toContain('auto-checkpoint');
+    // Saved to a rotorcc ref; the branch tip is still the agent's own work.
+    const agentTree = join(repo, '.claude', 'worktrees', 'agent-1');
+    expect(git(agentTree, 'rev-parse', 'refs/rotorcc/checkpoints/work/agent-1').trim()).toMatch(
+      /^[0-9a-f]{40}$/,
+    );
+    expect(git(remote, 'log', '-1', '--format=%s', 'work/agent-1')).not.toContain(
+      'auto-checkpoint',
+    );
   });
 
   it('survives a usage source that is broken, without touching anything', async () => {

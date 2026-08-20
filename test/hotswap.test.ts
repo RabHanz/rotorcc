@@ -219,16 +219,20 @@ describe('hotSwapAccount', () => {
     // window slides as the session appends, the new tail no longer starts with
     // the old one, the whole window reads as "fresh", and this old line is
     // re-found. In `auto` that replaces a live, working session.
-    writeFileSync(w.transcript, '{"text":"Login expired · Please run /login"}\n', { flag: 'a' });
+    // The sizes are chosen so the old bug is genuinely reachable: the stale
+    // failure line must still be inside a 64 KB trailing window at swap time,
+    // and the session's appends must be small enough to keep it there. Filler
+    // large enough to push it out would make the broken implementation pass.
     writeFileSync(w.transcript, `{"filler":"${'x'.repeat(200_000)}"}\n`, { flag: 'a' });
+    writeFileSync(w.transcript, '{"text":"Login expired · Please run /login"}\n', { flag: 'a' });
+    writeFileSync(w.transcript, `{"filler":"${'x'.repeat(1_000)}"}\n`, { flag: 'a' });
     const time = fakeTime();
     let ticks = 0;
     const sleep = (ms: number): Promise<void> => {
       ticks += 1;
-      // The session keeps working across the swap, sliding the window.
-      writeFileSync(w.transcript, `{"filler":"${'y'.repeat(100_000)}","n":${ticks}}\n`, {
-        flag: 'a',
-      });
+      // The session keeps working across the swap. Each append slides the tail
+      // window a little, which is exactly what defeated the prefix comparison.
+      writeFileSync(w.transcript, `{"work":"${'y'.repeat(2_000)}","n":${ticks}}\n`, { flag: 'a' });
       return time.sleep(ms);
     };
 

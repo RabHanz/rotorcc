@@ -19,8 +19,8 @@
  *      files rotorcc does not own, so purge names them and gives the exact
  *      command instead of reaching in.
  */
-import { existsSync, readdirSync, rmSync, statSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 
 import type { AccountManager } from '../accounts/manager.js';
 import { slots } from '../accounts/roster.js';
@@ -60,10 +60,39 @@ export interface PurgeTarget {
  * deleting a child of one destroys part of it.
  */
 export function pathsOverlap(path: string, other: string): boolean {
-  const a = resolve(path);
-  const b = resolve(other);
+  // `realpath`, not `resolve`. `resolve` normalises `..` and makes a path
+  // absolute; it does not follow symlinks. An operator with `~/claude ->
+  // ~/.claude` — a convenience link, or a config directory moved to another
+  // volume — could point `storePath` inside the link, share no textual prefix
+  // with the protected entry, and have the real directory deleted through it.
+  // A guard that depends on how the operator spelled the path is a guard.
+  const a = realOf(path);
+  const b = realOf(other);
   if (a === b) return true;
   return a.startsWith(`${b}${sep}`) || b.startsWith(`${a}${sep}`);
+}
+
+/**
+ * `realpath` where the path exists, `resolve` where it does not.
+ *
+ * A path that is not there yet cannot be dereferenced, and it also cannot be
+ * deleted, so the weaker answer is enough for it. Walking up to the nearest
+ * existing ancestor keeps the check honest for a not-yet-created directory
+ * underneath a symlinked parent, which is the case that matters.
+ */
+function realOf(path: string): string {
+  let current = resolve(path);
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...tail.reverse());
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      tail.push(basename(current));
+      current = parent;
+    }
+  }
 }
 
 export interface PurgeContext {
@@ -318,7 +347,11 @@ export function runPurge(ctx: PurgeContext): number {
     }
   }
 
-  const refused = targets.filter((t) => t.refused !== undefined);
+  // Only refusals that would actually have deleted something. A refused path
+  // that is not on disk was never going to be touched, and counting it makes
+  // purge exit non-zero — so a wrapper treating non-zero as "incomplete, retry"
+  // loops forever on a machine with nothing left to purge.
+  const refused = targets.filter((t) => t.refused !== undefined && t.exists);
 
   if (ctx.json) {
     emitJson({ deleted: true, removed, failed });
@@ -327,14 +360,18 @@ export function runPurge(ctx: PurgeContext): number {
     for (const target of refused) ctx.out(`  REFUSED  ${target.path}: ${target.refused ?? ''}`);
     for (const failure of failed) ctx.out(`  FAILED   ${failure.path}: ${failure.error}`);
     ctx.out('');
-    ctx.out(
-      failed.length === 0
-        ? `Purged. ${removed.length} path(s) removed; Claude Code's own state was not touched.`
-        : `${removed.length} removed, ${failed.length} could NOT be removed — see above.`,
-    );
-    if (refused.length > 0) {
+    // "Purged … not touched" printed directly above a list of refusals reads as
+    // a clean run. Say which it was, once.
+    if (failed.length > 0) {
+      ctx.out(`${removed.length} removed, ${failed.length} could NOT be removed — see above.`);
+    } else if (refused.length > 0) {
       ctx.out(
-        `${refused.length} path(s) were left alone because they overlap Claude Code's own state.`,
+        `${removed.length} path(s) removed. ${refused.length} were left alone because they ` +
+          "overlap Claude Code's own state — purge is NOT complete.",
+      );
+    } else {
+      ctx.out(
+        `Purged. ${removed.length} path(s) removed; Claude Code's own state was not touched.`,
       );
     }
   }

@@ -5,7 +5,7 @@
  * safe, and these are the conditions under which it is safe.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -128,20 +128,54 @@ describe('checkpointTree — the safety rules', () => {
     expect(git(repo, 'status', '--porcelain')).toContain('work.txt');
   });
 
-  it('commits and pushes a dirty feature branch', async () => {
+  it('saves a dirty feature branch to a rotorcc ref, and leaves the branch alone', async () => {
     git(repo, 'switch', '-c', 'work/feature');
     writeFileSync(join(repo, 'work.txt'), 'uncommitted\n');
+    const tipBefore = git(repo, 'rev-parse', 'HEAD').trim();
 
     const tree = await inspectTree(ctx, repo, project(), true);
     const result = await checkpointTree(ctx, tree!, options);
 
     expect(result.committed).toBe(true);
-    expect(result.pushed).toBe(true);
     expect(result.error).toBeNull();
-    expect(git(repo, 'status', '--porcelain').trim()).toBe('');
-    expect(git(repo, 'log', '-1', '--format=%s')).toContain('auto-checkpoint test');
-    // the commit is genuinely on the remote, not just locally
-    expect(git(remote, 'log', '-1', '--format=%s', 'work/feature')).toContain('auto-checkpoint');
+    expect(result.checkpointRef).toBe('refs/rotorcc/checkpoints/work/feature');
+
+    // The branch did not move. On 2026-08-19 this is exactly what went wrong:
+    // an agent's half-finished change became the tip of a shared branch, the
+    // branch went red, and the agent who owned it had not written that commit.
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(tipBefore);
+    expect(git(repo, 'log', '-1', '--format=%s')).not.toContain('auto-checkpoint');
+
+    // The agent's files are untouched — still dirty, still theirs to finish.
+    expect(git(repo, 'status', '--porcelain')).toContain('work.txt');
+    expect(readFileSync(join(repo, 'work.txt'), 'utf8')).toBe('uncommitted\n');
+
+    // And the work is genuinely recoverable from the ref.
+    expect(git(repo, 'show', 'refs/rotorcc/checkpoints/work/feature:work.txt')).toBe(
+      'uncommitted\n',
+    );
+
+    // The branch itself is published, because a branch with no remote at all is
+    // unsaved state and that is what this tool is for. What is NOT published is
+    // anything rotorcc wrote, or anything the agent had not finished.
+    expect(git(remote, 'log', '--format=%s', 'work/feature')).not.toContain('auto-checkpoint');
+    expect(() => git(remote, 'show', 'work/feature:work.txt')).toThrow();
+  });
+
+  it('never creates a ref under refs/heads or refs/remotes', async () => {
+    git(repo, 'switch', '-c', 'work/namespace');
+    writeFileSync(join(repo, 'a.txt'), 'dirty\n');
+    const branchesBefore = git(repo, 'branch', '--list');
+
+    const tree = await inspectTree(ctx, repo, project(), true);
+    await checkpointTree(ctx, tree!, options);
+
+    // A checkpoint must not be mistakable for deliberate work: it is not a
+    // branch, it does not show up in `git branch`, and CI never sees it.
+    expect(git(repo, 'branch', '--list')).toBe(branchesBefore);
+    const refs = git(repo, 'for-each-ref', '--format=%(refname)');
+    expect(refs).toContain('refs/rotorcc/checkpoints/work/namespace');
+    expect(refs).not.toContain('refs/heads/work/namespace-checkpoint');
   });
 
   it('on a routine trigger (commitDirty=false) leaves dirty files alone and pushes only what is committed', async () => {
@@ -248,6 +282,7 @@ describe('checkpointTree — the safety rules', () => {
     const tree = await inspectTree(ctx, noRemote, projectSchema.parse({ path: noRemote }), true);
     const result = await checkpointTree(ctx, tree!, options);
     expect(result.committed).toBe(true);
+    expect(result.checkpointRef).toBe('refs/rotorcc/checkpoints/work/lonely');
     expect(result.pushed).toBe(false);
     expect(result.skipped).toBe('no remote configured');
   });
@@ -295,14 +330,18 @@ describe('checkpointTree — never force-pushes', () => {
     git(other, 'commit', '-m', 'theirs');
     git(other, 'push');
 
-    // We have our own local commit, so the push cannot fast-forward.
+    // We have our OWN commit — an agent's real work, which is the only thing
+    // rotorcc ever pushes — so the push cannot fast-forward.
     writeFileSync(join(repo, 'ours.txt'), 'ours\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'ours');
+
     const tree = await inspectTree(ctx, repo, project(), true);
     const result = await checkpointTree(ctx, tree!, options);
 
-    expect(result.committed).toBe(true);
     expect(result.pushed).toBe(false);
-    expect(result.error).toContain('git push failed');
+    // Refused here, by name, rather than left to the server to reject.
+    expect(result.skipped ?? result.error ?? '').toMatch(/not an ancestor|git push failed/);
     // Their commit is untouched: nothing was overwritten.
     expect(git(remote, 'log', '--format=%s', 'work/diverged')).toContain('theirs');
   });
@@ -396,11 +435,11 @@ describe('the sweep never publishes a tree that is not a descendant of what it o
 
     const result = await checkpointTree(ctx, tree as NonNullable<typeof tree>, options);
 
-    // The dirty work is saved locally — durability is the point of the tool.
+    // The dirty work is saved — durability is the point of the tool.
     expect(result.committed).toBe(true);
-    // But it is NOT published over the newer history.
+    expect(result.checkpointRef).toBe('refs/rotorcc/checkpoints/work/behind');
+    // But nothing is published over the newer history.
     expect(result.pushed).toBe(false);
-    expect(result.skipped).toContain('not an ancestor');
     expect(result.error).toBeNull();
     expect(git(remote, 'log', '--format=%s', '-1', 'work/behind').trim()).toBe(
       'newer work from elsewhere',
@@ -408,21 +447,34 @@ describe('the sweep never publishes a tree that is not a descendant of what it o
     expect(git(remote, 'show', 'work/behind:a.txt')).toBe('THE NEWER WORK\n');
   });
 
-  it('still pushes normally when the tip really is a descendant', async () => {
+  it("still pushes the AGENT's own commits when the tip really is a descendant", async () => {
     git(repo, 'checkout', '-b', 'work/fine');
     writeFileSync(join(repo, 'a.txt'), 'base\n');
     git(repo, 'add', '-A');
     git(repo, 'commit', '-m', 'base');
     git(repo, 'push', '-u', 'origin', 'work/fine');
 
+    // A commit the agent made and did not push — the only thing rotorcc ever
+    // publishes — plus an unfinished edit beside it.
     writeFileSync(join(repo, 'a.txt'), 'a genuine edit\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-m', 'the agent finished something');
+    writeFileSync(join(repo, 'b.txt'), 'still being written\n');
+
     const tree = await inspectTree(ctx, repo, project(), true);
     const result = await checkpointTree(ctx, tree as NonNullable<typeof tree>, options);
 
-    expect(result.committed).toBe(true);
     expect(result.pushed).toBe(true);
     expect(result.skipped).toBeNull();
     expect(git(remote, 'show', 'work/fine:a.txt')).toBe('a genuine edit\n');
+    // The unfinished file was saved, and did NOT go to the remote.
+    expect(result.checkpointRef).toBe('refs/rotorcc/checkpoints/work/fine');
+    expect(git(repo, 'show', 'refs/rotorcc/checkpoints/work/fine:b.txt')).toBe(
+      'still being written\n',
+    );
+    expect(() => git(remote, 'show', 'work/fine:b.txt')).toThrow();
+    // Every remote commit has a real author's message, not rotorcc's.
+    expect(git(remote, 'log', '--format=%s', 'work/fine')).not.toContain('auto-checkpoint');
   });
 
   it('reads ahead and behind independently, so neither hides the other', async () => {
