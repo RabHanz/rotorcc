@@ -37,7 +37,13 @@
  * tested.
  */
 import type { Config } from '../config/schema.js';
-import { type AccountReading, type UsageReading, activeAccount, headroomIsKnown } from './usage.js';
+import {
+  type AccountReading,
+  type UsageReading,
+  activeAccount,
+  formatWindowsUsed,
+  headroomIsKnown,
+} from './usage.js';
 
 /** A window's headroom, or null when the account did not report it. */
 export function windowHeadroom(account: AccountReading, name: string): number | null {
@@ -134,6 +140,13 @@ export interface ExhaustedAccount {
   resetsAt: string | null;
   /** Why it is not a candidate, in words. */
   why: string;
+  /**
+   * Both windows, formatted, so the notice that stops the machine says which
+   * kind of exhausted each account is. "Out for forty minutes" and "out for the
+   * week" produce completely different next moves from the human this notice is
+   * addressed to, and a single figure cannot tell them apart.
+   */
+  windows?: string;
 }
 
 export interface PolicyInput {
@@ -185,6 +198,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: null,
         window: 'unknown',
         resetsAt: null,
+        windows: formatWindowsUsed(account),
         why: account.unknownReason ?? 'not measured',
       });
       continue;
@@ -196,6 +210,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: null,
         window: 'n/a',
         resetsAt: null,
+        windows: formatWindowsUsed(account),
         why: 'API-key account: bills per token, never an automatic target',
       });
       continue;
@@ -207,6 +222,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: weekly.pct,
         window: weekly.window,
         resetsAt: account.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(account),
         why: 'disabled by the operator',
       });
       continue;
@@ -218,6 +234,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: weekly.pct,
         window: weekly.window,
         resetsAt: account.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(account),
         why:
           weekly.pct === null
             ? 'weekly headroom unknown'
@@ -281,6 +298,7 @@ export function evaluatePolicy(input: PolicyInput): PolicyAction {
         headroomPct: activeWeekly.pct,
         window: activeWeekly.window,
         resetsAt: active.bindingResetsAt ?? null,
+        windows: formatWindowsUsed(active),
         why: 'the account in use',
       },
       ...rejected,
@@ -377,17 +395,19 @@ export function renderStopNotice(action: Extract<PolicyAction, { kind: 'stop' }>
   lines.push('  No rotation was performed. No session was started. Nothing is running');
   lines.push('  that will consume more quota.');
   lines.push('');
-  lines.push('  accounts');
+  lines.push('  accounts — how much of each window has been SPENT');
   for (const account of action.accounts) {
-    const headroom =
-      account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}% left`;
     const resets =
       account.resetsAt === null
         ? 'reset time unknown'
         : `resets ${account.resetsAt.slice(0, 16).replace('T', ' ')}`;
+    lines.push(`    ${String(account.slot).padEnd(3)} ${account.label}`);
+    // Both windows, then which one binds. The old form printed one figure as
+    // "N% left", which inverted the convention every other surface uses and
+    // said nothing about the window that was not chosen.
+    lines.push(`        ${account.windows ?? 'window spend not recorded'}`);
     lines.push(
-      `    ${String(account.slot).padEnd(3)} ${account.label.padEnd(26)} ` +
-        `${headroom.padEnd(14)} ${account.window.padEnd(8)} ${resets}`,
+      `        ${account.window === 'unknown' ? 'binding window unknown' : `${account.window} binds`} · ${resets}`,
     );
     lines.push(`        ${account.why}`);
   }

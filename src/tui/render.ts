@@ -25,13 +25,18 @@
  */
 import { type BurnRate, type Prediction, formatDuration } from '../core/burn.js';
 import type { DecisionEntry } from '../core/history.js';
+import type { Selection } from '../accounts/select.js';
+import type { Strategy } from '../accounts/select.js';
 import {
   type AccountReading,
   type UsageReading,
+  type WindowUsed,
+  formatBinding,
   headroomIsKnown,
-  usedPctOf,
+  windowsUsedOf,
 } from '../core/usage.js';
 import type { RotationSafety, WorkloadSnapshot } from '../core/workload.js';
+import { STRATEGY_CHOICES, type UiState } from './interaction.js';
 import { type Palette, padVisible, truncateVisible, visibleWidth } from './theme.js';
 
 export interface AccountPrediction {
@@ -73,12 +78,32 @@ export interface DashboardModel {
   refreshing: boolean;
   /** Set when the account store is empty and nothing can be measured. */
   noAccountsHint: string | null;
+  /** The strategy in force, which the `t` key can change. */
+  strategy: Strategy;
+  /**
+   * What the selector would choose right now, and why it rejected each of the
+   * others.
+   *
+   * This is the answer to "why has nothing happened?", computed from the same
+   * `selectTarget` the watcher uses rather than reconstructed from prose. Null
+   * when there is no reading to select over.
+   */
+  selection: Selection | null;
+  /** The most recent decision that was a refusal, a block or an error. */
+  lastRefusal: DecisionEntry | null;
+  /** Raised flags with the reason each was raised for. */
+  raisedFlags: Array<{ name: string; reason: string; raisedAt: string }>;
 }
 
 export interface RenderOptions {
   palette: Palette;
   width: number;
   height?: number;
+  /**
+   * Keyboard state. Absent for `--once` and for a piped run, which are
+   * read-only by nature — a frame going into a file has no cursor.
+   */
+  ui?: UiState;
 }
 
 /** How an unknown is spelled, everywhere, without exception. */
@@ -102,6 +127,9 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     flags.push(c.bad('[DRY RUN — nothing will be written]'));
   }
   if (model.refreshing) flags.push(c.dim('refreshing…'));
+  const ui = options.ui;
+  if (ui?.busy != null) flags.push(c.accent(`working: ${ui.busy}`));
+  if (ui?.paused === true) flags.push(c.warn('PAUSED'));
   const right = `${flags.join(' ')} ${c.dim(stamp)}`.trim();
   push(
     `${left}${' '.repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)))}${right}`,
@@ -109,7 +137,7 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
   push();
 
   // -------------------------------------------------------------- accounts
-  push(c.bold('ACCOUNTS'));
+  push(`${c.bold('ACCOUNTS')} ${c.dim('— how much of each window has been SPENT')}`);
   if (model.usage === null) {
     push(`  ${c.bad('could not read any account')} — ${model.usageError ?? 'reason not recorded'}`);
     if (model.noAccountsHint !== null) push(`  ${c.dim(model.noAccountsHint)}`);
@@ -117,9 +145,12 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     push(`  ${c.warn('rotorcc manages no accounts yet')}`);
     if (model.noAccountsHint !== null) push(`  ${c.dim(model.noAccountsHint)}`);
   } else {
-    for (const account of model.usage.accounts) {
-      for (const line of accountLines(account, model, c)) push(line);
-    }
+    const cursor = ui === undefined ? -1 : ui.cursor;
+    model.usage.accounts.forEach((account, index) => {
+      for (const line of accountLines(account, model, c, { cursor: index === cursor, width })) {
+        push(line);
+      }
+    });
     if (
       model.usage.activeDetectionReason !== undefined &&
       model.usage.activeAccountNumber === null
@@ -130,12 +161,37 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     }
     push(
       `  ${c.dim(
-        `thresholds: warn at ${100 - model.thresholds.warnPct}% used · ` +
-          `soft at ${100 - model.thresholds.softPct}% · rotate at ${100 - model.thresholds.rotatePct}%`,
+        `* the window that binds · thresholds: warn at ${100 - model.thresholds.warnPct}% used · ` +
+          `soft at ${100 - model.thresholds.softPct}% · rotate at ${100 - model.thresholds.rotatePct}% · ` +
+          `strategy ${model.strategy}`,
       )}`,
     );
   }
   push();
+
+  // ---------------------------------------------------------- last action
+  if (ui?.lastOutcome != null) {
+    const done = ui.lastOutcome;
+    push(
+      `${c.bold('LAST ACTION')} ${done.ok ? c.good('ok') : c.bad('FAILED')} ` +
+        `${c.dim(done.at.slice(11, 19))} ${done.dryRun ? c.bad('[dry run]') : ''}`,
+    );
+    push(`  ${done.title}`);
+    for (const line of done.lines.slice(0, 4)) push(`  ${c.dim(line)}`);
+    if (done.lines.length > 4) push(`  ${c.dim(`… ${done.lines.length - 4} more line(s)`)}`);
+    push();
+  }
+  if (ui?.note != null) {
+    push(`  ${c.warn(ui.note)}`);
+    push();
+  }
+
+  // Everything below this point is the standing report. When a panel is open —
+  // a confirmation, the strategy picker, the "why" panel — it replaces that
+  // report rather than being appended to it, so the question is never off the
+  // bottom of a short terminal. The accounts stay on screen above it, because
+  // every one of those questions is about an account.
+  const reportStartsAt = lines.length;
 
   // ------------------------------------------------------------ prediction
   push(c.bold('PREDICTION'));
@@ -261,50 +317,269 @@ export function renderDashboard(model: DashboardModel, options: RenderOptions): 
     }
   }
 
-  return lines;
-}
-
-function accountLines(account: AccountReading, model: DashboardModel, c: Palette): string[] {
-  const marker = account.active ? c.accent('▸') : ' ';
-  const label = account.alias ?? account.email ?? `account ${account.number}`;
-  const name = padVisible(truncateVisible(label, 26), 26);
-  const number = padVisible(`#${account.number}`, 4);
-
-  if (!headroomIsKnown(account)) {
-    // The rule, made concrete. No bar, no percentage, no implication.
-    const reason = account.unknownReason ?? 'not measured';
-    const tag = account.disabled === true ? c.dim(' [disabled]') : '';
+  if (ui !== undefined && ui.overlay.kind !== 'none') {
     return [
-      `  ${marker} ${number}${name} ${c.unknown(padVisible(UNKNOWN, 24))} ${c.dim(reason)}${tag}`,
+      ...lines.slice(0, reportStartsAt),
+      ...overlayLines(ui, model, c, width).map((line) => truncateVisible(line, width)),
     ];
   }
 
-  const level =
-    account.headroomPct <= model.thresholds.rotatePct
-      ? c.bad
-      : account.headroomPct <= model.thresholds.warnPct
-        ? c.warn
-        : c.good;
-  const used = usedPctOf(account);
-  if (used === null) {
-    // Unreachable while the guard above stands, and written as a refusal rather
-    // than a numeric fallback anyway. Under the used convention `?? 0` is
-    // actively dangerous: it renders an account rotorcc could not measure as
-    // "0% used", which reads as completely fresh and makes it the most
-    // attractive rotation target on the screen. The same fallback under the old
-    // convention read as "spent" and failed safe. An inversion turns a harmless
-    // default into a harmful one, quietly, which is why there is no default.
-    const reason = account.unknownReason ?? 'not measured';
-    return [`  ${marker} ${number}${name} ${c.unknown(padVisible(UNKNOWN, 24))} ${c.dim(reason)}`];
+  return lines;
+}
+
+/** A boxed panel. Plain characters, because this has to survive every terminal. */
+function panel(title: string, body: string[], c: Palette, width: number): string[] {
+  const inner = Math.max(20, Math.min(width, 96) - 4);
+  const rule = '─'.repeat(inner);
+  return [
+    `  ┌─${rule}─┐`,
+    `  │ ${padVisible(truncateVisible(c.bold(title), inner), inner)} │`,
+    `  ├─${rule}─┤`,
+    ...body.map((line) => `  │ ${padVisible(truncateVisible(line, inner), inner)} │`),
+    `  └─${rule}─┘`,
+  ];
+}
+
+/**
+ * The open panel, whichever it is.
+ *
+ * Every one of these ends with the keys that answer it. A dialog whose escape
+ * hatch is not written on it is a dialog somebody force-quits the terminal to
+ * get out of.
+ */
+function overlayLines(ui: UiState, model: DashboardModel, c: Palette, width: number): string[] {
+  switch (ui.overlay.kind) {
+    case 'none':
+      return [];
+
+    case 'confirm':
+      return panel(
+        ui.overlay.action.label,
+        [
+          ...ui.overlay.prompt,
+          '',
+          c.bold('y / enter') + c.dim('  do it   ') + c.bold('any other key') + c.dim('  cancel'),
+        ],
+        c,
+        width,
+      );
+
+    case 'strategy': {
+      const index = ui.overlay.index;
+      return panel(
+        'rotation strategy',
+        [
+          ...STRATEGY_CHOICES.map((choice, i) => {
+            const cursor = i === index ? c.accent('❯ ') : '  ';
+            const current = choice === model.strategy ? '(in force)' : '';
+            return (
+              `${cursor}${padVisible(choice, 16)}${padVisible(c.dim(current), 12)}` +
+              c.dim(STRATEGY_BLURBS[choice])
+            );
+          }),
+          '',
+          c.dim('This writes the config, the same as "rotorcc config set strategy".'),
+          c.dim('Nothing is switched by it; the next decision uses the new rule.'),
+          '',
+          c.bold('↑↓/jk') +
+            c.dim(' choose   ') +
+            c.bold('enter') +
+            c.dim(' apply   ') +
+            c.bold('esc') +
+            c.dim(' cancel'),
+        ],
+        c,
+        width,
+      );
+    }
+
+    case 'why':
+      return panel('why has nothing happened?', whyBody(model, c), c, width);
+
+    case 'outcome': {
+      const done = ui.overlay.outcome;
+      return panel(
+        `${done.ok ? 'done' : 'FAILED'} — ${done.title}`,
+        [
+          ...(done.dryRun ? [c.bad('DRY RUN — nothing was written.'), ''] : []),
+          ...(done.lines.length === 0 ? [c.dim('the command printed nothing')] : done.lines),
+          '',
+          c.dim('any key closes'),
+        ],
+        c,
+        width,
+      );
+    }
+
+    case 'help':
+      return panel('keys', helpBody(c), c, width);
   }
-  // Used, not remaining, and the window is printed beside it below. The bar
-  // fills as the window is spent, which is the direction every other quota
-  // display an operator looks at moves in.
-  const meter = `${bar(used)} ${level(`${used.toFixed(0).padStart(3)}% used`)}`;
-  const resets =
-    account.bindingResetsAt === undefined
-      ? c.dim('reset unknown')
-      : c.dim(`resets ${account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`);
+}
+
+const STRATEGY_BLURBS: Record<Strategy, string> = {
+  'work-aware': 'only accounts big enough to FINISH what is running',
+  best: 'largest weekly budget that is usable within the horizon',
+  'next-available': 'the next slot in order, skipping exhausted ones',
+  'consume-first': 'soonest reset first, to spend quota that would expire',
+};
+
+function helpBody(c: Palette): string[] {
+  const row = (keys: string, what: string): string => `  ${padVisible(c.bold(keys), 14)}${what}`;
+  return [
+    c.dim('watching'),
+    row('↑↓ / j k', 'move between accounts'),
+    row('r', 'refresh now'),
+    row('f', 'force a quota re-poll, ignoring the poll floor'),
+    row('p', 'pause / resume the background refresh'),
+    row('w', 'why has nothing happened — and what to do about it'),
+    row('q', 'quit'),
+    '',
+    c.dim('acting — each one asks first, and shows you what it did'),
+    row('enter / s', 'switch to the selected account now'),
+    row('b', 'rotate to the best target now, by the current strategy'),
+    row('d', 'disable / enable the selected account'),
+    row('t', 'change the rotation strategy'),
+    '',
+    c.dim('Every action here runs the same code as the matching command:'),
+    c.dim('switch → "rotorcc switch", d → "rotorcc accounts disable",'),
+    c.dim('t → "rotorcc config set strategy", w/c → "rotorcc push-unpushed".'),
+    '',
+    c.dim('any key closes'),
+  ];
+}
+
+/**
+ * The panel that answers the question a dashboard usually cannot.
+ *
+ * Not prose reconstructed after the fact: the rejection list comes from the
+ * same `selectTarget` the watcher calls, so what is on screen is what the
+ * decision actually saw.
+ */
+function whyBody(model: DashboardModel, c: Palette): string[] {
+  const body: string[] = [];
+
+  const refusal = model.lastRefusal;
+  body.push(c.dim('last decision that did not act'));
+  if (refusal === null) {
+    body.push('  none recorded — rotorcc has not refused or blocked anything yet');
+  } else {
+    body.push(`  ${refusal.at.slice(0, 16).replace('T', ' ')}  ${c.bad(refusal.kind)}`);
+    for (const chunk of wrap(refusal.reason, 84)) body.push(`  ${chunk}`);
+  }
+  body.push('');
+
+  body.push(c.dim(`what the "${model.strategy}" selector says right now`));
+  if (model.selection === null) {
+    body.push('  no reading to select over');
+  } else {
+    body.push(`  ${model.selection.reason.slice(0, 200)}`);
+    for (const entry of model.selection.rejected) {
+      body.push(`  ${c.dim(`#${entry.account.number}`)} ${entry.reason}`);
+    }
+  }
+  body.push('');
+
+  if (model.raisedFlags.length > 0) {
+    body.push(c.dim('flags raised'));
+    for (const flag of model.raisedFlags) {
+      body.push(`  ${c.warn(flag.name)} ${c.dim(flag.raisedAt.slice(11, 16))}`);
+      for (const chunk of wrap(flag.reason, 84)) body.push(`    ${chunk}`);
+    }
+    body.push('');
+  }
+
+  if (model.safety !== null && model.safety.verdict !== 'safe') {
+    body.push(c.dim('work in flight'));
+    body.push(
+      `  ${model.safety.verdict === 'refuse' ? c.bad('would refuse') : c.warn('save first')} — ${model.safety.reason}`,
+    );
+    body.push('');
+  }
+
+  body.push(
+    c.bold('c') +
+      c.dim(' checkpoint everything now   ') +
+      c.bold('x') +
+      c.dim(' clear raised flags   ') +
+      c.bold('f') +
+      c.dim(' re-poll   ') +
+      c.bold('esc') +
+      c.dim(' close'),
+  );
+  return body;
+}
+
+/** Break a long reason across lines without cutting a word in half. */
+function wrap(text: string, width: number): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    if (current === '') current = word;
+    else if (current.length + 1 + word.length <= width) current = `${current} ${word}`;
+    else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current !== '') lines.push(current);
+  return lines.slice(0, 6);
+}
+
+/**
+ * The width at which the spend bars fit beside both figures.
+ *
+ * Below it the bars are dropped and the two percentages stay. Given a choice
+ * between a picture of one number and both numbers, both numbers win: the
+ * defect this layout exists to prevent was caused by seeing one window and
+ * inferring the other.
+ */
+const BAR_WIDTH_THRESHOLD = 104;
+
+/**
+ * One window's cell.
+ *
+ * `*` marks the window that binds. It is printed as well as, never instead of,
+ * the other window — and the row's trailer says the same thing in words, so a
+ * terminal narrow enough to truncate the trailer still shows which one is the
+ * constraint.
+ */
+function windowCell(
+  window: WindowUsed,
+  thresholds: DashboardModel['thresholds'],
+  c: Palette,
+  showBar: boolean,
+): string {
+  const mark = window.binding ? c.accent('*') : ' ';
+  const name = c.dim(padVisible(window.name, 3));
+  if (window.usedPct === null) {
+    // No bar and no number. An empty bar and a bar for a genuine 0% look
+    // identical, and only one of them is a measurement — and under a used
+    // convention the harmless-looking `?? 0` renders an unmeasured account as
+    // "0% used", which reads as completely fresh and makes it the most
+    // attractive rotation target on the screen.
+    return `${mark}${name}${c.unknown(padVisible(UNKNOWN, showBar ? 17 : 9))}`;
+  }
+  const headroom = window.headroomPct ?? 0;
+  const tone =
+    headroom <= thresholds.rotatePct ? c.bad : headroom <= thresholds.warnPct ? c.warn : c.good;
+  const figure = tone(padVisible(`${window.usedPct.toFixed(0)}% used`, 9));
+  return showBar ? `${mark}${name}${bar(window.usedPct, 7)} ${figure}` : `${mark}${name}${figure}`;
+}
+
+function accountLines(
+  account: AccountReading,
+  model: DashboardModel,
+  c: Palette,
+  options: { cursor: boolean; width: number },
+): string[] {
+  const pointer = options.cursor ? c.accent('❯') : ' ';
+  const marker = account.active ? c.accent('▸') : ' ';
+  const label = account.alias ?? account.email ?? `account ${account.number}`;
+  const name = padVisible(truncateVisible(label, 18), 18);
+  const number = padVisible(`#${account.number}`, 4);
+  const showBar = options.width >= BAR_WIDTH_THRESHOLD;
+
   const age =
     account.usageAgeMs === null || account.usageAgeMs === undefined
       ? ''
@@ -315,10 +590,27 @@ function accountLines(account: AccountReading, model: DashboardModel, c: Palette
     (account.disabled === true ? c.dim(' [disabled]') : '') +
     (account.kind === 'api-key' ? c.dim(' [api-key]') : '');
 
-  return [
-    `  ${marker} ${padVisible(`#${account.number}`, 4)}${name} ${meter} ` +
-      `${c.dim(padVisible(account.bindingWindow, 7))} ${resets}${age}${tags}`,
-  ];
+  // BOTH windows, always, each named and each reported as spent. Collapsing to
+  // the binding one is what made a 5-hour window at 99% and a week at 72% read
+  // as the same account — and only one of those is a reason to stop working.
+  const windows = windowsUsedOf(account);
+  const headline = windows
+    .slice(0, 2)
+    .map((w) => windowCell(w, model.thresholds, c, showBar))
+    .join(' ');
+  const binding = headroomIsKnown(account)
+    ? c.dim(formatBinding(account))
+    : c.unknown(formatBinding(account));
+
+  const lines = [`${pointer}${marker} ${number}${name} ${headline} ${binding}${age}${tags}`];
+  for (const extra of windows.slice(2)) {
+    // Per-model weekly caps. A full one stops the work exactly as hard as the
+    // account-wide window, so it is never dropped — only ranked below.
+    lines.push(
+      `${' '.repeat(7)}${padVisible('', 18)} ${windowCell(extra, model.thresholds, c, showBar)}`,
+    );
+  }
+  return lines;
 }
 
 function predictionLines(prediction: AccountPrediction, rotatePct: number, c: Palette): string[] {
@@ -398,10 +690,19 @@ function ago(iso: string | null, now: Date, c: Palette): string {
   return c.dim(`${formatDuration(Math.max(0, ms))} ago`);
 }
 
-/** The one-line key at the bottom of the live view. */
-export function footer(c: Palette, paused: boolean): string {
+/**
+ * The one-line key at the bottom of the live view.
+ *
+ * The acting keys are named on it, not hidden behind `?`. A dashboard whose
+ * controls are undiscoverable is a dashboard people keep a second terminal open
+ * beside, which is the thing this pane exists to stop.
+ */
+export function footer(c: Palette, state: { paused: boolean; readOnly?: boolean }): string {
+  if (state.readOnly === true) {
+    return c.dim('read-only: this is not an interactive terminal · rotorcc never invents a number');
+  }
   return c.dim(
-    `q quit · r refresh now · p ${paused ? 'resume' : 'pause'} · rotorcc never invents a number: ` +
-      '"unknown" means unknown',
+    `↑↓ pick · enter switch · b rotate best · d disable · f re-poll · t strategy · ` +
+      `w why · ? keys · p ${state.paused ? 'resume' : 'pause'} · q quit`,
   );
 }

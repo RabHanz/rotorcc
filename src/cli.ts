@@ -40,7 +40,7 @@ import { runDoctor, renderDoctor } from './commands/doctor.js';
 import { runHook } from './commands/hook.js';
 import { runInit } from './commands/init.js';
 import { install, uninstall } from './commands/installHooks.js';
-import { buildStatus, renderStatus } from './commands/status.js';
+import { buildStatus, renderStatus, statusJson } from './commands/status.js';
 import {
   addAccount,
   addToken,
@@ -513,7 +513,7 @@ async function main(): Promise<number> {
     case 'status': {
       const ctx = contextFor(flags);
       const report = await buildStatus(ctx.config, ctx.store, readUsage);
-      if (flags.json === true) out(JSON.stringify(report, null, 2));
+      if (flags.json === true) out(JSON.stringify(statusJson(report), null, 2));
       else process.stdout.write(renderStatus(report, ctx.config));
       return 0;
     }
@@ -521,10 +521,23 @@ async function main(): Promise<number> {
     case 'tui':
     case 'watch': {
       const ctx = contextFor(flags);
+      // A file-only logger, deliberately. The dashboard owns the alternate
+      // screen; a log line arriving on stderr mid-frame draws itself across the
+      // account table and stays there until the next redraw. Everything the
+      // acting keys do is still logged, in the same file every other command
+      // writes to.
+      const logger = new Logger({
+        file: ctx.config.logging.file === '' ? appPaths().logFile : ctx.config.logging.file,
+        level: flags.verbose === true ? 'debug' : ctx.config.logging.level,
+        maxBytes: ctx.config.logging.maxBytes,
+        console: false,
+      });
       return runTui({
         config: ctx.config,
         store: ctx.store,
         manager: managerFor(ctx.config),
+        logger,
+        configPath: ctx.configPath,
         dryRun: ctx.dryRun,
         force: flags.force === true,
         once: flags.once === true,

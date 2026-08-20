@@ -109,7 +109,7 @@ describe('capacityOf', () => {
     expect(capacity.note).toContain('resets in 20m');
   });
 
-  it('reports used, with the window, like every other surface', () => {
+  it('reports BOTH windows as used, like every other surface', () => {
     const note = capacityOf(
       account(9, [
         { name: '5h', headroomPct: 40 },
@@ -117,8 +117,15 @@ describe('capacityOf', () => {
       ]),
       { nowMs: NOW },
     ).note;
-    expect(note).toContain('70% used on 7d now');
+    // Both, always. A candidate list that names only the window that binds
+    // makes the reader guess at the other one, which is the mistake that
+    // produced the 2026-08-19 misreport.
+    expect(note).toContain('5h 60% used');
+    expect(note).toContain('7d 70% used');
+    expect(note).toContain('7d binds');
+    // Headroom, the inverted convention, must not appear anywhere in it.
     expect(note).not.toContain('30% on');
+    expect(note).not.toContain('40% on');
   });
 
   it('treats an unknown reset time as unready, never as "back soon"', () => {
@@ -184,9 +191,13 @@ describe('selectTarget ranking', () => {
     );
 
     expect(selection.chosen?.number).toBe(3);
-    // The note reports USED, like every other surface: 28% headroom on the
-    // weekly budget is 72% of it spent.
-    expect(selection.ranked[0]?.note).toContain('72% of its 7d budget used');
+    // The note reports USED on BOTH windows, like every other surface. This is
+    // the exact account from the incident: its 5-hour window is 99% spent and
+    // its week is only 72% spent, and a note that showed one of those numbers
+    // alone is what made it look finished.
+    expect(selection.ranked[0]?.note).toContain('5h 99% used');
+    expect(selection.ranked[0]?.note).toContain('7d 72% used');
+    expect(selection.ranked[0]?.note).toContain('5h binds');
     expect(selection.ranked[0]?.note).not.toMatch(/\d+% on \w+ now$/);
     expect(selection.reason).toContain('weekly budget');
   });

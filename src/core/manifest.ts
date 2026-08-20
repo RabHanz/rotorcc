@@ -39,13 +39,43 @@ export const manifestProjectSchema = z.object({
     .default([]),
 });
 
+/** One window's spend, as recorded in a manifest. */
+export const manifestWindowSchema = z.object({
+  name: z.string(),
+  /** Null when rotorcc could not measure it. Never 0, never 100. */
+  usedPct: z.number().nullable(),
+  resetsAt: z.string().nullable(),
+  binding: z.boolean().default(false),
+});
+
 export const manifestAccountSchema = z.object({
   number: z.number(),
   label: z.string(),
-  headroomPct: z.number(),
+  /**
+   * Headroom on the binding window.
+   *
+   * Nullable since 0.3: it used to be written as a plain number, which meant an
+   * account rotorcc could not measure was recorded in the rescue document as
+   * having 0% left. A manifest is read months later by somebody reconstructing
+   * what happened, and a placeholder that reads as a measurement is exactly the
+   * kind of confident falsehood this file exists to avoid. Manifests written
+   * before this change still parse, because they always carried a number.
+   */
+  headroomPct: z.number().nullable().default(null),
+  /** The same figure the human surfaces report in. Null when unmeasured. */
+  usedPct: z.number().nullable().default(null),
   bindingWindow: z.string(),
   resetsAt: z.string().nullable(),
   active: z.boolean(),
+  /**
+   * Every window, with `5h` and `7d` always present.
+   *
+   * Defaulted to empty so older manifests parse. New ones always carry both,
+   * because a manifest that records only the binding window loses the fact that
+   * makes it readable later: whether the account was rate-limited for an hour
+   * or out of budget for the week.
+   */
+  windows: z.array(manifestWindowSchema).default([]),
 });
 
 export const manifestSchema = z.object({
@@ -288,11 +318,27 @@ export function renderManifestMarkdown(manifest: Manifest): string {
 
   push('## Accounts');
   push();
-  push('| # | account | headroom | binding window | resets |');
-  push('| --- | --- | --- | --- | --- |');
+  // BOTH windows, each as spend, each labelled by its own column. A table with
+  // one "headroom" column could not say whether an account was rate-limited for
+  // the next hour or out of budget for the week, and those need opposite
+  // responses from whoever reads this document afterwards.
+  push('| # | account | 5h used | 7d used | binds | resets |');
+  push('| --- | --- | --- | --- | --- | --- |');
   for (const account of manifest.accounts.list) {
+    const cell = (name: string): string => {
+      const window = account.windows.find((w) => w.name === name);
+      if (window === undefined || window.usedPct === null) return 'unknown';
+      return `${window.usedPct.toFixed(0)}%`;
+    };
+    const extra = account.windows
+      .filter((w) => w.name !== '5h' && w.name !== '7d')
+      .map(
+        (w) => ` (${w.name} ${w.usedPct === null ? 'unknown' : `${w.usedPct.toFixed(0)}% used`})`,
+      )
+      .join('');
     push(
-      `| ${account.number}${account.active ? ' (active)' : ''} | ${account.label} | ${account.headroomPct.toFixed(0)}% | ${account.bindingWindow} | ${account.resetsAt ?? '—'} |`,
+      `| ${account.number}${account.active ? ' (active)' : ''} | ${account.label}${extra} | ` +
+        `${cell('5h')} | ${cell('7d')} | ${account.bindingWindow} | ${account.resetsAt ?? '—'} |`,
     );
   }
   if (manifest.accounts.targetNumber !== null) {

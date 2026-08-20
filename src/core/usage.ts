@@ -167,6 +167,248 @@ export function formatUsed(account: AccountReading): string {
   return `${used.toFixed(0)}% used (${account.bindingWindow})`;
 }
 
+/**
+ * The two windows every account surface must show, in the order it shows them.
+ *
+ * Not a display preference. Showing only the binding window is what produced
+ * the 2026-08-19 misreport: an account was called nearly dead because its
+ * 5-hour window was 99% spent, while its week — the budget that actually
+ * decides anything — was at 72%. One number cannot distinguish "wait forty
+ * minutes" from "this account is finished for the week", and the operator has
+ * to be able to tell those apart at a glance. Two numbers side by side make
+ * that mistake unavailable.
+ */
+export const HEADLINE_WINDOWS = ['5h', '7d'] as const;
+
+/** One window's spend, or an honest absence of one. */
+export interface WindowUsed {
+  /** `5h`, `7d`, or a per-model weekly cap's name. */
+  name: string;
+  /** Percent of this window SPENT. Null when rotorcc could not measure it. */
+  usedPct: number | null;
+  /** Percent left. Null on exactly the same terms as `usedPct`. */
+  headroomPct: number | null;
+  /** When this window rolls over, when the source reported it. */
+  resetsAt: string | null;
+  /** True for the window that constrains the account right now. */
+  binding: boolean;
+  /** Why this window has no number. Null when it has one. */
+  unknownReason: string | null;
+}
+
+/**
+ * Every window an account has, with `5h` and `7d` ALWAYS present.
+ *
+ * A window the account did not report comes back with `usedPct: null` and a
+ * reason — never 0 and never 100. Under a used-not-remaining convention the
+ * tempting fallback is the dangerous one in both directions: `0` reads as a
+ * completely fresh account and makes it the most attractive rotation target on
+ * the screen, and `100` reads as a confident "this is finished". Neither is a
+ * measurement, so neither is printed.
+ *
+ * Per-model weekly caps are appended after the two headline windows. They are
+ * real constraints — a spent per-model cap stops the work as hard as the
+ * account-wide one — so they are never dropped, only ranked lower.
+ */
+export function windowsUsedOf(account: AccountReading): WindowUsed[] {
+  const known = headroomIsKnown(account);
+  const clamp = (value: number): number => Math.max(0, Math.min(100, value));
+  const from = (window: WindowReading): WindowUsed => ({
+    name: window.name,
+    usedPct: clamp(100 - window.headroomPct),
+    headroomPct: clamp(window.headroomPct),
+    resetsAt: window.resetsAt ?? null,
+    // Nothing binds on an account whose headline figure is unknown: the binding
+    // window is precisely the fact that could not be established.
+    binding: known && account.bindingWindow === window.name,
+    unknownReason: null,
+  });
+
+  const rows: WindowUsed[] = [];
+  for (const name of HEADLINE_WINDOWS) {
+    const reported = account.windows.find((w) => w.name === name);
+    if (reported !== undefined) {
+      rows.push(from(reported));
+      continue;
+    }
+    rows.push({
+      name,
+      usedPct: null,
+      headroomPct: null,
+      resetsAt: null,
+      binding: false,
+      unknownReason: known
+        ? `no ${name} window was reported for this account`
+        : (account.unknownReason ?? 'not measured'),
+    });
+  }
+  for (const window of account.windows) {
+    if ((HEADLINE_WINDOWS as readonly string[]).includes(window.name)) continue;
+    rows.push(from(window));
+  }
+  return rows;
+}
+
+/** `5h 78% used · 7d 90% used` — every figure labelled, none of them bare. */
+export function formatWindowsUsed(
+  account: AccountReading,
+  options: { separator?: string } = {},
+): string {
+  return windowsUsedOf(account)
+    .map((w) =>
+      w.usedPct === null ? `${w.name} unknown` : `${w.name} ${w.usedPct.toFixed(0)}% used`,
+    )
+    .join(options.separator ?? ' · ');
+}
+
+/**
+ * An ASCII spend bar. Filled left to right as the window is consumed, which is
+ * the direction every other quota display an operator looks at moves in.
+ */
+export function asciiBar(usedPct: number, width = 6): string {
+  const filled = Math.max(0, Math.min(width, Math.round((usedPct / 100) * width)));
+  return `${'#'.repeat(filled)}${'.'.repeat(width - filled)}`;
+}
+
+/**
+ * One window as a fixed-width cell: `5h ####.. 78% used`.
+ *
+ * The window name is inside the cell rather than in a column heading on
+ * purpose. A row copied out of a table and pasted into a message loses the
+ * heading, and a percentage whose window has to be inferred is exactly the
+ * ambiguity that produced two reporting errors in one day.
+ *
+ * An unmeasured window gets the word `unknown` and no bar. An empty bar and a
+ * bar for a genuine 0% look identical, and only one of them is a measurement.
+ */
+export function formatWindowCell(
+  window: WindowUsed,
+  options: { bar?: (usedPct: number) => string; barWidth?: number; nameWidth?: number } = {},
+): string {
+  const barWidth = options.barWidth ?? 10;
+  const drawBar = options.bar ?? ((used: number) => asciiBar(used, barWidth));
+  const bodyWidth = barWidth + 10;
+  const body =
+    window.usedPct === null
+      ? 'unknown'.padEnd(bodyWidth)
+      : `${drawBar(window.usedPct)} ${`${window.usedPct.toFixed(0)}%`.padStart(4)} used`;
+  return `${window.name.padEnd(options.nameWidth ?? 3)} ${body}`;
+}
+
+/**
+ * The name column width for one account's cells.
+ *
+ * Per-model caps have names like `opus-7d`, and a cell whose name overflows its
+ * column pushes that row's bar out of line with every other row. One width per
+ * account keeps the account's own rows aligned, which is the comparison that
+ * matters.
+ */
+export function windowNameWidth(windows: WindowUsed[]): number {
+  return windows.reduce((widest, w) => Math.max(widest, w.name.length), 3);
+}
+
+/**
+ * One line per window, for the printed surfaces (`status`, `accounts`).
+ *
+ * A line each rather than two cells crammed onto the account's row. That buys
+ * three things the single-row form could not fit: the full window name, each
+ * window's OWN reset time, and enough bar to tell 78% from 90% at a glance. The
+ * account's row above carries the label and which window binds; these carry the
+ * two numbers that must never appear alone.
+ *
+ * The binding window is marked here as well as on the row above. Saying it
+ * twice is deliberate — the previous display said it once, by showing nothing
+ * else, and that is the defect this replaces.
+ */
+export function windowLines(account: AccountReading, indent = '         '): string[] {
+  const windows = windowsUsedOf(account);
+  const nameWidth = windowNameWidth(windows);
+  return windows.map((window) => {
+    const cell = formatWindowCell(window, { nameWidth });
+    const resets = window.usedPct === null ? '' : `  ${formatResetAt(window.resetsAt)}`;
+    return `${indent}${cell}${resets}${window.binding ? '  <- binds' : ''}`.trimEnd();
+  });
+}
+
+/** `2026-08-24 06:59` — the one way a reset time is written. */
+export function formatResetAt(resetsAt: string | null | undefined): string {
+  if (resetsAt === null || resetsAt === undefined || resetsAt === '') return 'reset time unknown';
+  return `resets ${resetsAt.slice(0, 16).replace('T', ' ')}`;
+}
+
+/**
+ * Which window currently constrains the account, and when it lets go.
+ *
+ * Kept beside the two figures rather than instead of them. Which window binds
+ * is real information — it is the difference between waiting and moving — but
+ * it can never be the only thing on screen.
+ */
+export function formatBinding(account: AccountReading): string {
+  if (!headroomIsKnown(account)) {
+    return `binding window unknown — ${account.unknownReason ?? 'not measured'}`;
+  }
+  return `${account.bindingWindow} binds · ${formatResetAt(account.bindingResetsAt ?? null)}`;
+}
+
+/**
+ * One line describing an account, for a log entry, a reason string or a prose
+ * surface. Both windows, then which one binds.
+ */
+export function accountHeadline(account: AccountReading): string {
+  return `${formatWindowsUsed(account)} (${formatBinding(account)})`;
+}
+
+/**
+ * The machine-readable shape of an account, used by every `--json` surface.
+ *
+ * `usedPct` is the convention every human surface reports in and the one
+ * Anthropic's API and Claude Code's status line already use. `headroomPct`
+ * keeps its original meaning rather than being inverted under the same name:
+ * silently flipping a field would make an existing consumer read 99 as
+ * "healthy" when it means "nearly gone", which is worse than either convention
+ * on its own. Both are null — never 0, never 100 — when unmeasured.
+ */
+export interface AccountJson {
+  slot: number;
+  email: string | null;
+  alias: string | null;
+  active: boolean;
+  disabled: boolean;
+  kind: 'oauth' | 'api-key';
+  usedPct: number | null;
+  headroomPct: number | null;
+  headroomKnown: boolean;
+  bindingWindow: string | null;
+  bindingResetsAt: string | null;
+  unknownReason: string | null;
+  usageAgeSeconds: number | null;
+  /** Always carries `5h` and `7d`, even when one of them could not be read. */
+  windows: WindowUsed[];
+}
+
+export function accountJson(account: AccountReading): AccountJson {
+  const known = headroomIsKnown(account);
+  return {
+    slot: account.number,
+    email: account.email ?? null,
+    alias: account.alias ?? null,
+    active: account.active,
+    disabled: account.disabled ?? false,
+    kind: account.kind ?? 'oauth',
+    usedPct: usedPctOf(account),
+    headroomPct: known ? account.headroomPct : null,
+    headroomKnown: known,
+    bindingWindow: known ? account.bindingWindow : null,
+    bindingResetsAt: account.bindingResetsAt ?? null,
+    unknownReason: known ? null : (account.unknownReason ?? 'not measured'),
+    usageAgeSeconds:
+      account.usageAgeMs === null || account.usageAgeMs === undefined
+        ? null
+        : Math.round(account.usageAgeMs / 1000),
+    windows: windowsUsedOf(account),
+  };
+}
+
 export interface UsageReading {
   observedAt: string;
   activeAccountNumber: number | null;

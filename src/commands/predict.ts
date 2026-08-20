@@ -24,7 +24,7 @@ import {
   willFinishFirst,
 } from '../core/burn.js';
 import type { Store } from '../core/state.js';
-import { headroomIsKnown } from '../core/usage.js';
+import { headroomIsKnown, usedPctOf, windowLines, windowsUsedOf } from '../core/usage.js';
 import { collectWorkload, estimateHeadroomNeeded } from '../core/workload.js';
 
 export interface PredictOptions {
@@ -79,9 +79,12 @@ export async function runPredict(options: PredictOptions): Promise<number> {
           accounts: rows.map((r) => ({
             slot: r.account.number,
             active: r.account.active,
+            usedPct: usedPctOf(r.account),
             headroomPct: headroomIsKnown(r.account) ? r.account.headroomPct : null,
             headroomKnown: headroomIsKnown(r.account),
             bindingWindow: headroomIsKnown(r.account) ? r.account.bindingWindow : null,
+            // Always carries 5h and 7d, each null when unmeasured.
+            windows: windowsUsedOf(r.account),
             burnPctPerHour: r.rate.pctPerHour,
             burnConfidence: r.rate.confidence,
             burnSamples: r.rate.samples,
@@ -115,18 +118,19 @@ export async function runPredict(options: PredictOptions): Promise<number> {
     const label = row.account.alias ?? row.account.email ?? `account ${row.account.number}`;
     out(`${row.account.active ? '>' : ' '} ${label} (slot ${row.account.number})`);
 
+    // Both windows, always. The projection below is about the window that
+    // binds, and reading that number without the other one beside it is how
+    // "this account is nearly gone" got said about an account whose week was
+    // perfectly healthy.
+    out('    spent');
+    for (const line of windowLines(row.account, '      ')) out(line);
+
     if (!headroomIsKnown(row.account)) {
-      out(`    headroom      unknown — ${row.account.unknownReason ?? 'not measured'}`);
+      out(`    binding       unknown — ${row.account.unknownReason ?? 'not measured'}`);
       out('');
       continue;
     }
 
-    out(
-      `    headroom      ${row.account.headroomPct.toFixed(0)}% on ${row.account.bindingWindow}` +
-        (row.account.bindingResetsAt === undefined
-          ? ''
-          : `, resets ${row.account.bindingResetsAt.slice(0, 16).replace('T', ' ')}`),
-    );
     out(`    burn rate     ${describeRate(row.rate)}`);
     out(
       `    hits ${String(config.thresholds.rotatePct).padStart(2)}%      ${

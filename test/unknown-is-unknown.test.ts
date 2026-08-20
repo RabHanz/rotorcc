@@ -337,6 +337,10 @@ describe('the dashboard never draws a number it does not have', () => {
       dryRun: false,
       refreshing: false,
       noAccountsHint: null,
+      strategy: 'work-aware' as const,
+      selection: null,
+      lastRefusal: null,
+      raisedFlags: [],
     };
   }
 

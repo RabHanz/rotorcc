@@ -217,6 +217,10 @@ describe('the dashboard under stress', () => {
     dryRun: false,
     refreshing: false,
     noAccountsHint: null,
+    strategy: 'work-aware' as const,
+    selection: null,
+    lastRefusal: null,
+    raisedFlags: [],
   };
 
   it('never emits a line wider than the terminal', () => {
